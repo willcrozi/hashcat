@@ -157,7 +157,9 @@ int hip_init (void *hashcat_ctx)
   HC_LOAD_FUNC_HIP (hip, hipInit,                   hipInit,                      HIP_HIPINIT,                    HIP, 1);
   HC_LOAD_FUNC_HIP (hip, hipLaunchKernel,           hipModuleLaunchKernel,        HIP_HIPLAUNCHKERNEL,            HIP, 1);
   HC_LOAD_FUNC_HIP (hip, hipMemAlloc,               hipMalloc,                    HIP_HIPMEMALLOC,                HIP, 1);
+  HC_LOAD_FUNC_HIP (hip, hipHostMalloc,             hipHostMalloc,                HIP_HIPHOSTMALLOC,              HIP, 1);
   HC_LOAD_FUNC_HIP (hip, hipMemFree,                hipFree,                      HIP_HIPMEMFREE,                 HIP, 1);
+  HC_LOAD_FUNC_HIP (hip, hipHostFree,               hipHostFree,                  HIP_HIPHOSTFREE,                HIP, 1);
   HC_LOAD_FUNC_HIP (hip, hipMemGetInfo,             hipMemGetInfo,                HIP_HIPMEMGETINFO,              HIP, 1);
   HC_LOAD_FUNC_HIP (hip, hipMemcpyDtoD,             hipMemcpyDtoD,                HIP_HIPMEMCPYDTOD,              HIP, 1);
   HC_LOAD_FUNC_HIP (hip, hipMemcpyDtoH,             hipMemcpyDtoH,                HIP_HIPMEMCPYDTOH,              HIP, 1);
@@ -851,6 +853,33 @@ int hc_hipMemAlloc (void *hashcat_ctx, hipDeviceptr_t *dptr, size_t bytesize)
   return 0;
 }
 
+int hc_hipHostMalloc (void *hashcat_ctx, void **pp, size_t bytesize, unsigned int flags)
+{
+  backend_ctx_t *backend_ctx = ((hashcat_ctx_t *) hashcat_ctx)->backend_ctx;
+
+  HIP_PTR *hip = backend_ctx->hip;
+
+  const hipError_t HIP_err = hip->hipHostMalloc (pp, bytesize, flags);
+
+  if (HIP_err != hipSuccess)
+  {
+    const char *pStr = NULL;
+
+    if (hip->hipGetErrorString (HIP_err, &pStr) == hipSuccess)
+    {
+      event_log_error (hashcat_ctx, "hipHostMalloc(): %s", pStr);
+    }
+    else
+    {
+      event_log_error (hashcat_ctx, "hipHostMalloc(): %d", HIP_err);
+    }
+
+    return -1;
+  }
+
+  return 0;
+}
+
 int hc_hipMemFree (void *hashcat_ctx, hipDeviceptr_t dptr)
 {
   backend_ctx_t *backend_ctx = ((hashcat_ctx_t *) hashcat_ctx)->backend_ctx;
@@ -870,6 +899,33 @@ int hc_hipMemFree (void *hashcat_ctx, hipDeviceptr_t dptr)
     else
     {
       event_log_error (hashcat_ctx, "hipMemFree(): %d", HIP_err);
+    }
+
+    return -1;
+  }
+
+  return 0;
+}
+
+int hc_hipHostFree (void *hashcat_ctx, void *p)
+{
+  backend_ctx_t *backend_ctx = ((hashcat_ctx_t *) hashcat_ctx)->backend_ctx;
+
+  HIP_PTR *hip = (HIP_PTR *) backend_ctx->hip;
+
+  const hipError_t HIP_err = hip->hipHostFree (p);
+
+  if (HIP_err != hipSuccess)
+  {
+    const char *pStr = NULL;
+
+    if (hip->hipGetErrorString (HIP_err, &pStr) == hipSuccess)
+    {
+      event_log_error (hashcat_ctx, "hipHostFree(): %s", pStr);
+    }
+    else
+    {
+      event_log_error (hashcat_ctx, "hipHostFree(): %d", HIP_err);
     }
 
     return -1;

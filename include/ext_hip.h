@@ -517,6 +517,21 @@ typedef enum hipJitOption
 
 } hipJitOption;
 
+// Flags that can be used with hipHostMalloc.
+/** Default flags.*/
+#define hipHostMallocDefault        0x0
+/** Memory is considered allocated by all contexts.*/
+#define hipHostMallocPortable       0x1
+/** Map the allocation into the address space for the current device. The device pointer can
+ * be obtained with hipHostGetDevicePointer().*/
+#define hipHostMallocMapped         0x2
+/** Allocate memory as write-combined.*/
+#define hipHostMallocWriteCombined  0x4
+/** Allocate coherent memory. Overrides HIP_COHERENT_HOST_ALLOC for specific allocation.*/
+#define hipHostMallocCoherent       0x40000000
+/** Allocate non-coherent memory. Overrides HIP_COHERENT_HOST_ALLOC for specific allocation.*/
+#define hipHostMallocNonCoherent    0x80000000
+
 // stop: hip_runtime_api.h
 
 #ifdef _WIN32
@@ -554,6 +569,8 @@ typedef hipError_t (HIP_API_CALL *HIP_HIPEVENTSYNCHRONIZE)       (hipEvent_t);
 typedef hipError_t (HIP_API_CALL *HIP_HIPFUNCGETATTRIBUTE)       (int *, hipFunction_attribute, hipFunction_t);
 typedef hipError_t (HIP_API_CALL *HIP_HIPGETERRORNAME)           (hipError_t, const char **);
 typedef hipError_t (HIP_API_CALL *HIP_HIPGETERRORSTRING)         (hipError_t, const char **);
+typedef hipError_t (HIP_API_CALL *HIP_HIPHOSTMALLOC)             (void **, size_t, unsigned int);
+typedef hipError_t (HIP_API_CALL *HIP_HIPHOSTFREE)               (void *);
 typedef hipError_t (HIP_API_CALL *HIP_HIPINIT)                   (unsigned int);
 typedef hipError_t (HIP_API_CALL *HIP_HIPLAUNCHKERNEL)           (hipFunction_t, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, hipStream_t, void **, void **);
 typedef hipError_t (HIP_API_CALL *HIP_HIPMEMALLOC)               (hipDeviceptr_t *, size_t);
@@ -614,6 +631,8 @@ typedef struct hc_hip_lib
   HIP_HIPFUNCGETATTRIBUTE       hipFuncGetAttribute;
   HIP_HIPGETERRORNAME           hipGetErrorName;
   HIP_HIPGETERRORSTRING         hipGetErrorString;
+  HIP_HIPHOSTFREE               hipHostFree;
+  HIP_HIPHOSTMALLOC             hipHostMalloc;
   HIP_HIPINIT                   hipInit;
   HIP_HIPLAUNCHKERNEL           hipLaunchKernel;
   HIP_HIPMEMALLOC               hipMemAlloc;
@@ -684,7 +703,9 @@ int hc_hipFuncGetAttribute      (void *hashcat_ctx, int *pi, hipFunction_attribu
 int hc_hipInit                  (void *hashcat_ctx, unsigned int Flags);
 int hc_hipLaunchKernel          (void *hashcat_ctx, hipFunction_t f, unsigned int gridDimX, unsigned int gridDimY, unsigned int gridDimZ, unsigned int blockDimX, unsigned int blockDimY, unsigned int blockDimZ, unsigned int sharedMemBytes, hipStream_t hStream, void **kernelParams, void **extra);
 int hc_hipMemAlloc              (void *hashcat_ctx, hipDeviceptr_t *dptr, size_t bytesize);
+int hc_hipHostMalloc            (void *hashcat_ctx, void **pp, size_t bytesize, unsigned int flags);
 int hc_hipMemFree               (void *hashcat_ctx, hipDeviceptr_t dptr);
+int hc_hipHostFree              (void *hashcat_ctx, void *p);
 int hc_hipMemGetInfo            (void *hashcat_ctx, size_t *free, size_t *total);
 int hc_hipMemcpyDtoD            (void *hashcat_ctx, hipDeviceptr_t dstDevice, hipDeviceptr_t srcDevice, size_t ByteCount);
 int hc_hipMemcpyDtoH            (void *hashcat_ctx, void *dstHost, hipDeviceptr_t srcDevice, size_t ByteCount);

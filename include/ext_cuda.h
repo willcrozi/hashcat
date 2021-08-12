@@ -1113,6 +1113,27 @@ typedef enum CUjitInputType_enum
 
 } CUjitInputType;
 
+/**
+ * If set, host memory is portable between CUDA contexts.
+ * Flag for ::cuMemHostAlloc()
+ */
+#define CU_MEMHOSTALLOC_PORTABLE        0x01
+
+/**
+ * If set, host memory is mapped into CUDA address space and
+ * ::cuMemHostGetDevicePointer() may be called on the host pointer.
+ * Flag for ::cuMemHostAlloc()
+ */
+#define CU_MEMHOSTALLOC_DEVICEMAP       0x02
+
+/**
+ * If set, host memory is allocated as write-combined - fast to write,
+ * faster to DMA, slow to read except via SSE4 streaming load instruction
+ * (MOVNTDQA).
+ * Flag for ::cuMemHostAlloc()
+ */
+#define CU_MEMHOSTALLOC_WRITECOMBINED   0x04
+
 #ifdef _WIN32
 #define CUDAAPI __stdcall
 #else
@@ -1154,6 +1175,7 @@ typedef CUresult (CUDA_API_CALL *CUDA_CUINIT)                   (unsigned int);
 typedef CUresult (CUDA_API_CALL *CUDA_CULAUNCHKERNEL)           (CUfunction, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, CUstream, void **, void **);
 typedef CUresult (CUDA_API_CALL *CUDA_CUMEMALLOC)               (CUdeviceptr *, size_t);
 typedef CUresult (CUDA_API_CALL *CUDA_CUMEMALLOCHOST)           (void **, size_t);
+typedef CUresult (CUDA_API_CALL *CUDA_CUMEMHOSTALLOC)           (void **, size_t, unsigned int);
 typedef CUresult (CUDA_API_CALL *CUDA_CUMEMCPYDTOD)             (CUdeviceptr, CUdeviceptr, size_t);
 typedef CUresult (CUDA_API_CALL *CUDA_CUMEMCPYDTOH)             (void *, CUdeviceptr, size_t);
 typedef CUresult (CUDA_API_CALL *CUDA_CUMEMCPYHTOD)             (CUdeviceptr, const void *, size_t);
@@ -1222,6 +1244,7 @@ typedef struct hc_cuda_lib
   CUDA_CULAUNCHKERNEL           cuLaunchKernel;
   CUDA_CUMEMALLOC               cuMemAlloc;
   CUDA_CUMEMALLOCHOST           cuMemAllocHost;
+  CUDA_CUMEMHOSTALLOC           cuMemHostAlloc;
   CUDA_CUMEMCPYDTOD             cuMemcpyDtoD;
   CUDA_CUMEMCPYDTOH             cuMemcpyDtoH;
   CUDA_CUMEMCPYHTOD             cuMemcpyHtoD;
@@ -1287,6 +1310,7 @@ int hc_cuFuncSetAttribute      (void *hashcat_ctx, CUfunction hfunc, CUfunction_
 int hc_cuInit                  (void *hashcat_ctx, unsigned int Flags);
 int hc_cuLaunchKernel          (void *hashcat_ctx, CUfunction f, unsigned int gridDimX, unsigned int gridDimY, unsigned int gridDimZ, unsigned int blockDimX, unsigned int blockDimY, unsigned int blockDimZ, unsigned int sharedMemBytes, CUstream hStream, void **kernelParams, void **extra);
 int hc_cuMemAlloc              (void *hashcat_ctx, CUdeviceptr *dptr, size_t bytesize);
+int hc_cuMemHostAlloc          (void *hashcat_ctx, void **pp, size_t bytesize, unsigned int Flags);
 int hc_cuMemcpyDtoD            (void *hashcat_ctx, CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t ByteCount);
 int hc_cuMemcpyDtoH            (void *hashcat_ctx, void *dstHost, CUdeviceptr srcDevice, size_t ByteCount);
 int hc_cuMemcpyHtoD            (void *hashcat_ctx, CUdeviceptr dstDevice, const void *srcHost, size_t ByteCount);
@@ -1298,6 +1322,7 @@ int hc_cuMemcpyHtoDAsync       (void *hashcat_ctx, CUdeviceptr dstDevice, const 
 int hc_cuMemsetD32Async        (void *hashcat_ctx, CUdeviceptr dstDevice, unsigned int ui, size_t N, CUstream hStream);
 int hc_cuMemsetD8Async         (void *hashcat_ctx, CUdeviceptr dstDevice, unsigned char uc, size_t N, CUstream hStream);
 int hc_cuMemFree               (void *hashcat_ctx, CUdeviceptr dptr);
+int hc_cuMemFreeHost           (void *hashcat_ctx, void *p);
 int hc_cuMemGetInfo            (void *hashcat_ctx, size_t *free, size_t *total);
 int hc_cuModuleGetFunction     (void *hashcat_ctx, CUfunction *hfunc, CUmodule hmod, const char *name);
 int hc_cuModuleGetGlobal       (void *hashcat_ctx, CUdeviceptr *dptr, size_t *bytes, CUmodule hmod, const char *name);

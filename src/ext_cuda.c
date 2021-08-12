@@ -87,6 +87,7 @@ int cuda_init (void *hashcat_ctx)
   HC_LOAD_FUNC_CUDA (cuda, cuLaunchKernel,           cuLaunchKernel,            CUDA_CULAUNCHKERNEL,            CUDA, 1);
   HC_LOAD_FUNC_CUDA (cuda, cuMemAlloc,               cuMemAlloc_v2,             CUDA_CUMEMALLOC,                CUDA, 1);
   HC_LOAD_FUNC_CUDA (cuda, cuMemAllocHost,           cuMemAllocHost_v2,         CUDA_CUMEMALLOCHOST,            CUDA, 1);
+  HC_LOAD_FUNC_CUDA (cuda, cuMemHostAlloc,           cuMemHostAlloc,            CUDA_CUMEMHOSTALLOC,            CUDA, 1);
   HC_LOAD_FUNC_CUDA (cuda, cuMemcpyDtoD,             cuMemcpyDtoD_v2,           CUDA_CUMEMCPYDTOD,              CUDA, 1);
   HC_LOAD_FUNC_CUDA (cuda, cuMemcpyDtoH,             cuMemcpyDtoH_v2,           CUDA_CUMEMCPYDTOH,              CUDA, 1);
   HC_LOAD_FUNC_CUDA (cuda, cuMemcpyHtoD,             cuMemcpyHtoD_v2,           CUDA_CUMEMCPYHTOD,              CUDA, 1);
@@ -547,6 +548,33 @@ int hc_cuMemAlloc (void *hashcat_ctx, CUdeviceptr *dptr, size_t bytesize)
   return 0;
 }
 
+int hc_cuMemHostAlloc (void *hashcat_ctx, void **pp, size_t bytesize, unsigned int Flags)
+{
+  backend_ctx_t *backend_ctx = ((hashcat_ctx_t *) hashcat_ctx)->backend_ctx;
+
+  CUDA_PTR *cuda = (CUDA_PTR *) backend_ctx->cuda;
+
+  const CUresult CU_err = cuda->cuMemHostAlloc (pp, bytesize, Flags);
+
+  if (CU_err != CUDA_SUCCESS)
+  {
+    const char *pStr = NULL;
+
+    if (cuda->cuGetErrorString (CU_err, &pStr) == CUDA_SUCCESS)
+    {
+      event_log_error (hashcat_ctx, "cuMemHostAlloc(): %s", pStr);
+    }
+    else
+    {
+      event_log_error (hashcat_ctx, "cuMemHostAlloc(): %d", CU_err);
+    }
+
+    return -1;
+  }
+
+  return 0;
+}
+
 int hc_cuMemFree (void *hashcat_ctx, CUdeviceptr dptr)
 {
   backend_ctx_t *backend_ctx = ((hashcat_ctx_t *) hashcat_ctx)->backend_ctx;
@@ -566,6 +594,33 @@ int hc_cuMemFree (void *hashcat_ctx, CUdeviceptr dptr)
     else
     {
       event_log_error (hashcat_ctx, "cuMemFree(): %d", CU_err);
+    }
+
+    return -1;
+  }
+
+  return 0;
+}
+
+int hc_cuMemFreeHost (void *hashcat_ctx, void *p)
+{
+  backend_ctx_t *backend_ctx = ((hashcat_ctx_t *) hashcat_ctx)->backend_ctx;
+
+  CUDA_PTR *cuda = backend_ctx->cuda;
+
+  const CUresult CU_err = cuda->cuMemFreeHost (p);
+
+  if (CU_err != CUDA_SUCCESS)
+  {
+    const char *pStr = NULL;
+
+    if (cuda->cuGetErrorString (CU_err, &pStr) == CUDA_SUCCESS)
+    {
+      event_log_error (hashcat_ctx, "cuMemFreeHost(): %s", pStr);
+    }
+    else
+    {
+      event_log_error (hashcat_ctx, "cuMemFreeHost(): %d", CU_err);
     }
 
     return -1;
