@@ -192,9 +192,6 @@ static int calc_stdin (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_par
 
     u64 words_extra_total = 0;
 
-    memset (device_param->pws_comp, 0, device_param->size_pws_comp);
-    memset (device_param->pws_idx,  0, device_param->size_pws_idx);
-
     #define DISABLE_READ_TIMEOUT_AFTER 1000
 
     int selects_returned = 0;
