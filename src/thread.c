@@ -326,3 +326,60 @@ int finish_after_attack (hashcat_ctx_t *hashcat_ctx)
 
   return 0;
 }
+
+cond_wait_result_t thread_cond_timedwait (hc_thread_cond_t *cond, hc_thread_mutex_t *mux, u32 timeout_ms)
+{
+  #if defined (_WIN)
+  if (SleepConditionVariableCS (cond, mux, timeout_ms) == 1) return COND_WAIT_SIGNALLED;
+
+  if (GetLastError () == ERROR_TIMEOUT) return COND_WAIT_TIMEOUT;
+
+  return COND_WAIT_ERROR;
+  #else
+  struct timespec abstime;
+
+  #if defined (__APPLE__) && defined (MISSING_CLOCK_GETTIME)
+  struct timeval tv;
+
+  gettimeofday (&tv, NULL);
+
+  abstime.tv_sec = tv.tv_sec;
+  abstime.tv_nsec = tv.tv_usec * 1000;
+
+  #else
+  clock_gettime (CLOCK_REALTIME, &abstime);
+  #endif
+
+  abstime.tv_sec  += timeout_ms / 1000;
+  abstime.tv_nsec += (timeout_ms % 1000) * 1000000;
+
+  #define NANOS_PER_SEC 1000000000
+
+  if (abstime.tv_nsec >= NANOS_PER_SEC)
+  {
+    abstime.tv_sec  += 1;
+    abstime.tv_nsec -= NANOS_PER_SEC;
+  }
+
+  switch (pthread_cond_timedwait (cond, mux, &abstime))
+  {
+    case 0:         return COND_WAIT_SIGNALLED;
+    case ETIMEDOUT: return COND_WAIT_TIMEOUT;
+    default:        return COND_WAIT_ERROR;
+  }
+  #endif
+}
+
+cond_wait_result_t thread_cond_wait (hc_thread_cond_t *cond, hc_thread_mutex_t *mux)
+{
+  #if defined (_WIN)
+  return thread_cond_timedwait (cond, mux, INFINITE);
+  #else
+  switch (pthread_cond_wait (cond, mux))
+  {
+    case 0:         return COND_WAIT_SIGNALLED;
+    case ETIMEDOUT: return COND_WAIT_TIMEOUT;
+    default:        return COND_WAIT_ERROR;
+  }
+  #endif
+}

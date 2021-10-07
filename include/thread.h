@@ -17,46 +17,62 @@
 
 #if defined (_WIN)
 
-#define hc_thread_create(t,f,a)     t = CreateThread (NULL, 0, (LPTHREAD_START_ROUTINE) &f, a, 0, NULL)
-#define hc_thread_wait(n,a)         for (int i = 0; i < n; i++) WaitForSingleObject ((a)[i], INFINITE)
-#define hc_thread_exit(t)           ExitThread (t)
-#define hc_thread_detach(t)         CloseHandle (t)
+#define hc_thread_create(t,f,a)      t = CreateThread (NULL, 0, (LPTHREAD_START_ROUTINE) &f, a, 0, NULL)
+#define hc_thread_wait(n,a)          for (int i = 0; i < n; i++) WaitForSingleObject ((a)[i], INFINITE)
+#define hc_thread_exit(t)            ExitThread (t)
+#define hc_thread_detach(t)          CloseHandle (t)
 
-#define hc_thread_mutex_init(m)     InitializeCriticalSection (&m)
-#define hc_thread_mutex_lock(m)     EnterCriticalSection      (&m)
-#define hc_thread_mutex_unlock(m)   LeaveCriticalSection      (&m)
-#define hc_thread_mutex_delete(m)   DeleteCriticalSection     (&m)
+#define hc_thread_mutex_init(m)      InitializeCriticalSection (&m)
+#define hc_thread_mutex_lock(m)      EnterCriticalSection      (&m)
+#define hc_thread_mutex_unlock(m)    LeaveCriticalSection      (&m)
+#define hc_thread_mutex_delete(m)    DeleteCriticalSection     (&m)
 
 /*
-#define hc_thread_mutex_init(m)     m = CreateMutex     (NULL, FALSE, NULL)
-#define hc_thread_mutex_lock(m)     WaitForSingleObject (m, INFINITE)
-#define hc_thread_mutex_unlock(m)   ReleaseMutex        (m)
-#define hc_thread_mutex_delete(m)   CloseHandle         (m)
+#define hc_thread_mutex_init(m)      m = CreateMutex     (NULL, FALSE, NULL)
+#define hc_thread_mutex_lock(m)      WaitForSingleObject (m, INFINITE)
+#define hc_thread_mutex_unlock(m)    ReleaseMutex        (m)
+#define hc_thread_mutex_delete(m)    CloseHandle         (m)
 */
 
-#define hc_thread_sem_init(s)       s = CreateSemaphore (NULL, 0, INT_MAX, NULL)
-#define hc_thread_sem_post(s)       ReleaseSemaphore    (s, 1, NULL)
-#define hc_thread_sem_wait(s)       WaitForSingleObject (s, INFINITE)
-#define hc_thread_sem_close(s)      CloseHandle         (s)
+#define hc_thread_sem_init(s)        s = CreateSemaphore (NULL, 0, INT_MAX, NULL)
+#define hc_thread_sem_post(s)        ReleaseSemaphore    (s, 1, NULL)
+#define hc_thread_sem_wait(s)        WaitForSingleObject (s, INFINITE)
+#define hc_thread_sem_close(s)       CloseHandle         (s)
+
+// note: condvar macro arg 'c' is *hc_thread_cond_t
+#define hc_thread_cond_init(c)       InitializeConditionVariable (c)
+#define hc_thread_cond_notify(c)     WakeConditionVariable       (c)
+#define hc_thread_cond_notify_all(c) WakeAllConditionVariable    (c)
+#define hc_thread_cond_close(c)      // no-op
 
 #else
 
-#define hc_thread_create(t,f,a)     pthread_create (&t, NULL, f, a)
-#define hc_thread_wait(n,a)         for (int i = 0; i < n; i++) pthread_join ((a)[i], NULL)
-#define hc_thread_exit(t)           pthread_exit (&t)
-#define hc_thread_detach(t)         pthread_detach (t)
+#define hc_thread_create(t,f,a)      pthread_create (&t, NULL, f, a)
+#define hc_thread_wait(n,a)          for (int i = 0; i < n; i++) pthread_join ((a)[i], NULL)
+#define hc_thread_exit(t)            pthread_exit (&t)
+#define hc_thread_detach(t)          pthread_detach (t)
 
-#define hc_thread_mutex_init(m)     pthread_mutex_init     (&m, NULL)
-#define hc_thread_mutex_lock(m)     pthread_mutex_lock     (&m)
-#define hc_thread_mutex_unlock(m)   pthread_mutex_unlock   (&m)
-#define hc_thread_mutex_delete(m)   pthread_mutex_destroy  (&m)
+#define hc_thread_mutex_init(m)      pthread_mutex_init     (&m, NULL)
+#define hc_thread_mutex_lock(m)      pthread_mutex_lock     (&m)
+#define hc_thread_mutex_unlock(m)    pthread_mutex_unlock   (&m)
+#define hc_thread_mutex_delete(m)    pthread_mutex_destroy  (&m)
 
-#define hc_thread_sem_init(s)       sem_init  (&s, 0, 0)
-#define hc_thread_sem_post(s)       sem_post  (&s)
-#define hc_thread_sem_wait(s)       sem_wait  (&s)
-#define hc_thread_sem_close(s)      sem_close (&s)
+#define hc_thread_sem_init(s)        sem_init  (&s, 0, 0)
+#define hc_thread_sem_post(s)        sem_post  (&s)
+#define hc_thread_sem_wait(s)        sem_wait  (&s)
+#define hc_thread_sem_close(s)       sem_close (&s)
+
+// note: 'c' argument for hc_thread_cond_* macros below has type *hc_thread_cond_t
+
+#define hc_thread_cond_init(c)       pthread_cond_init      (c, NULL)
+#define hc_thread_cond_notify(c)     pthread_cond_signal    (c)
+#define hc_thread_cond_notify_all(c) pthread_cond_broadcast (c)
+#define hc_thread_cond_close(c)      pthread_cond_destroy   (c)
 
 #endif
+
+#define hc_thread_cond_timedwait(c,m,t) thread_cond_timedwait (c, &m, t)
+#define hc_thread_cond_wait(c,m)        thread_cond_wait (c, &m)
 
 /*
 #if defined (_WIN)
@@ -85,5 +101,8 @@ int SuspendThreads (hashcat_ctx_t *hashcat_ctx);
 int ResumeThreads (hashcat_ctx_t *hashcat_ctx);
 int stop_at_checkpoint (hashcat_ctx_t *hashcat_ctx);
 int finish_after_attack (hashcat_ctx_t *hashcat_ctx);
+
+cond_wait_result_t thread_cond_timedwait (hc_thread_cond_t *cond, hc_thread_mutex_t *mux, u32 timeout_ms);
+cond_wait_result_t thread_cond_wait (hc_thread_cond_t *cond, hc_thread_mutex_t *mux);
 
 #endif // HC_THREAD_H

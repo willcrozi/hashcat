@@ -79,16 +79,26 @@ typedef struct timespec   hc_timer_t;
 #endif
 
 #if defined (_WIN)
-typedef HANDLE           hc_thread_t;
-typedef CRITICAL_SECTION hc_thread_mutex_t;
-typedef HANDLE           hc_thread_semaphore_t;
+typedef HANDLE             hc_thread_t;
+typedef CRITICAL_SECTION   hc_thread_mutex_t;
+typedef HANDLE             hc_thread_semaphore_t;
+typedef CONDITION_VARIABLE hc_thread_cond_t;
 #else
-typedef pthread_t        hc_thread_t;
-typedef pthread_mutex_t  hc_thread_mutex_t;
-typedef sem_t            hc_thread_semaphore_t;
+typedef pthread_t          hc_thread_t;
+typedef pthread_mutex_t    hc_thread_mutex_t;
+typedef sem_t              hc_thread_semaphore_t;
+typedef pthread_cond_t     hc_thread_cond_t;
 #endif
 
 // enums
+
+typedef enum cond_wait_result
+{
+  COND_WAIT_SIGNALLED = 0,
+  COND_WAIT_TIMEOUT = 1,
+  COND_WAIT_ERROR = 2,
+
+} cond_wait_result_t;
 
 typedef enum loglevel
 {
