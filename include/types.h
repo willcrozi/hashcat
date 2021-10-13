@@ -1481,6 +1481,10 @@ typedef struct hc_device_param
 
   pw_idx_t *pws_idx;
   u32      *pws_comp;
+
+  pw_idx_t *pws_idx_b;
+  u32      *pws_comp_b;
+
   u64       pws_cnt;
 
   pw_pre_t *pws_pre_buf;  // for slow candidates

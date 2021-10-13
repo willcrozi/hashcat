@@ -16246,6 +16246,13 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
         accel_limit_host = accel_limit_host - (accel_limit_host * 0.34);
       }
 
+      // adjust for extra buffers used by stdin-mode
+      // TODO quick hack for PoC, almost certainly not the correct way to go
+      //  about this
+      if (user_options_extra->wordlist_mode == WL_MODE_STDIN) {
+        accel_limit_host = accel_limit_host - (accel_limit_host * 0.75);
+      }
+
       accel_limit_host /= backend_ctx->backend_devices_active;
 
       // even tho let's not be greedy
@@ -16441,9 +16448,22 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
 
       const u64 size_host_extra = (512 * 1024 * 1024) / backend_ctx->backend_devices_active;
 
+      // if we are in stdin-mode pws_comp and pws_idx are double buffered on the host
+
+      u64 size_pws_comp_b = 0;
+      u64 size_pws_idx_b  = 0;
+
+      if (user_options_extra->wordlist_mode == WL_MODE_STDIN)
+      {
+        size_pws_comp_b = size_pws_comp;
+        size_pws_idx_b  = size_pws_idx;
+      }
+
       const u64 size_total_host
         = size_pws_comp
+        + size_pws_comp_b
         + size_pws_idx
+        + size_pws_idx_b
         + size_hooks
         #ifdef WITH_BRAIN
         + size_brain_link_in
@@ -16626,6 +16646,17 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
     pw_idx_t *pws_idx = (pw_idx_t *) hcmalloc (size_pws_idx);
 
     device_param->pws_idx = pws_idx;
+
+    if (user_options_extra->wordlist_mode == WL_MODE_STDIN)
+    {
+      u32 *pws_comp_b = (u32 *) hcmalloc (size_pws_comp);
+
+      device_param->pws_comp_b = pws_comp_b;
+
+      pw_idx_t *pws_idx_b = (pw_idx_t *) hcmalloc (size_pws_idx);
+
+      device_param->pws_idx_b = pws_idx_b;
+    }
 
     pw_t *combs_buf = (pw_t *) hccalloc (KERNEL_COMBS, sizeof (pw_t));
 
@@ -16946,6 +16977,8 @@ void backend_session_destroy (hashcat_ctx_t *hashcat_ctx)
     hcfree_bridge_aligned (device_param->h_tmps);
     hcfree (device_param->pws_comp);
     hcfree (device_param->pws_idx);
+    hcfree (device_param->pws_comp_b);
+    hcfree (device_param->pws_idx_b);
     hcfree (device_param->pws_pre_buf);
     hcfree (device_param->pws_base_buf);
     hcfree (device_param->combs_buf);
@@ -17281,7 +17314,9 @@ void backend_session_destroy (hashcat_ctx_t *hashcat_ctx)
 
     device_param->h_tmps              = NULL;
     device_param->pws_comp            = NULL;
+    device_param->pws_comp_b          = NULL;
     device_param->pws_idx             = NULL;
+    device_param->pws_idx_b           = NULL;
     device_param->pws_pre_buf         = NULL;
     device_param->pws_base_buf        = NULL;
     device_param->combs_buf           = NULL;
@@ -17325,8 +17360,10 @@ void backend_session_reset (hashcat_ctx_t *hashcat_ctx)
 
     // some more resets:
 
-    if (device_param->pws_comp) memset (device_param->pws_comp, 0, device_param->size_pws_comp);
-    if (device_param->pws_idx)  memset (device_param->pws_idx,  0, device_param->size_pws_idx);
+    if (device_param->pws_comp)   memset (device_param->pws_comp,   0, device_param->size_pws_comp);
+    if (device_param->pws_idx)    memset (device_param->pws_idx,    0, device_param->size_pws_idx);
+    if (device_param->pws_comp_b) memset (device_param->pws_comp_b, 0, device_param->size_pws_comp);
+    if (device_param->pws_idx_b)  memset (device_param->pws_idx_b,  0, device_param->size_pws_idx);
 
     device_param->pws_cnt = 0;
 

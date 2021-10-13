@@ -146,6 +146,167 @@ static u64 get_work (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param
   return work;
 }
 
+// dedicated per-device upload/crack thread related
+
+static void *thread_stdin_crack (void *p); // forward decl
+
+typedef struct crack_ctx
+{
+  hashcat_ctx_t     *hashcat_ctx;
+  hc_device_param_t *device_param;
+
+  bool work;
+  bool stop;
+  bool err;
+
+  hc_thread_mutex_t mux;
+  hc_thread_cond_t  cond;
+
+  hc_thread_t thread;
+
+} crack_ctx_t;
+
+static void crack_ctx_init (crack_ctx_t *crack_ctx, hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param)
+{
+  crack_ctx->hashcat_ctx  = hashcat_ctx;
+  crack_ctx->device_param = device_param;
+
+  crack_ctx->work = false;
+  crack_ctx->stop = false;
+  crack_ctx->err  = false;
+
+  hc_thread_mutex_init (crack_ctx->mux);
+  hc_thread_cond_init  (&crack_ctx->cond);
+
+  hc_thread_create (crack_ctx->thread, thread_stdin_crack, (void *) crack_ctx);
+}
+
+static void crack_ctx_notify_work (crack_ctx_t *crack_ctx)
+{
+  hc_thread_mutex_lock (crack_ctx->mux);
+
+  crack_ctx->work = true;
+
+  hc_thread_mutex_unlock (crack_ctx->mux);
+
+  hc_thread_cond_notify (&crack_ctx->cond);
+}
+
+static void crack_ctx_wait_idle (crack_ctx_t *crack_ctx)
+{
+  hc_thread_mutex_lock (crack_ctx->mux);
+
+  while (crack_ctx->work == true)
+  {
+    hc_thread_cond_wait (&crack_ctx->cond, crack_ctx->mux);
+  }
+
+  hc_thread_mutex_unlock (crack_ctx->mux);
+}
+
+static void crack_ctx_close (crack_ctx_t *crack_ctx, bool quiesce)
+{
+  hc_thread_mutex_lock (crack_ctx->mux);
+
+  if (quiesce == true)
+  {
+    while (crack_ctx->work == true)
+    {
+      hc_thread_cond_wait (&crack_ctx->cond, crack_ctx->mux);
+    }
+  }
+
+  crack_ctx->stop = true;
+
+  hc_thread_mutex_unlock (crack_ctx->mux);
+
+  hc_thread_cond_notify (&crack_ctx->cond);
+
+  hc_thread_wait (1, &crack_ctx->thread);
+
+  hc_thread_cond_close (&crack_ctx->cond);
+
+  hc_thread_mutex_delete (crack_ctx->mux);
+}
+
+static void *thread_stdin_crack (void *p)
+{
+  crack_ctx_t       *crack_ctx    = (crack_ctx_t *) p;
+  hashcat_ctx_t     *hashcat_ctx  = crack_ctx->hashcat_ctx;
+  hc_device_param_t *device_param = crack_ctx->device_param;
+
+  hc_thread_mutex_lock (crack_ctx->mux);
+
+  if (device_param->is_cuda == true)
+  {
+    crack_ctx->err = (hc_cuCtxPushCurrent (hashcat_ctx, device_param->cuda_context) == -1);
+
+    if (crack_ctx->err == true) goto exit2;
+  }
+
+  if (device_param->is_hip == true)
+  {
+    crack_ctx->err = (hc_hipCtxPushCurrent (hashcat_ctx, device_param->hip_context) == -1);
+
+    if (crack_ctx->err == true) goto exit2;
+  }
+
+  while (crack_ctx->stop == false)
+  {
+    while (crack_ctx->work == false)
+    {
+      if (crack_ctx->stop == true) goto exit1;
+
+      hc_thread_cond_wait (&crack_ctx->cond, crack_ctx->mux);
+    }
+
+    if (device_param->pws_cnt == 0) continue;
+
+    hc_thread_mutex_unlock (crack_ctx->mux);
+
+    // flush
+
+    crack_ctx->err = (run_copy (hashcat_ctx, device_param, device_param->pws_cnt) == -1);
+
+    if (crack_ctx->err == false)
+    {
+      crack_ctx->err = (run_cracker (hashcat_ctx, device_param, -1, device_param->pws_cnt) == -1); // no pws_pos?
+    }
+
+    device_param->pws_cnt = 0;
+
+    hc_thread_mutex_lock (crack_ctx->mux);
+
+    crack_ctx->work = false;
+
+    hc_thread_cond_notify (&crack_ctx->cond);
+
+    if (crack_ctx->err == true) break;
+  }
+
+  exit1:
+
+  if (device_param->is_cuda == true)
+  {
+    crack_ctx->err = (hc_cuCtxPopCurrent (hashcat_ctx, &device_param->cuda_context) == -1);
+  }
+
+  if (device_param->is_hip == true)
+  {
+    crack_ctx->err = (hc_hipCtxPopCurrent (hashcat_ctx, &device_param->hip_context) == -1);
+  }
+
+  exit2:
+
+  crack_ctx->work = false; // redundant?
+
+  hc_thread_cond_notify (&crack_ctx->cond);
+
+  hc_thread_mutex_unlock (crack_ctx->mux);
+
+  return NULL;
+}
+
 static void *buf_align (void *buf, u16 align)
 {
   if (align <= 1) return buf;
@@ -204,9 +365,18 @@ static int calc_stdin (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_par
     iconv_tmp = (char *) hcmalloc (HCBUFSIZ_TINY);
   }
 
-  // password input main loop
+  // per device upload/cracking thread setup
 
-  int ret = 0;
+  crack_ctx_t crack_ctx;
+
+  crack_ctx_init (&crack_ctx, hashcat_ctx, device_param);
+
+  u32      *pws_comp_next = device_param->pws_comp_b;
+  pw_idx_t *pws_idx_next  = device_param->pws_idx_b;
+
+  u64 pws_cnt_next = 0;
+
+  // password input main loop
 
   bool eof = false;
 
@@ -220,7 +390,7 @@ static int calc_stdin (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_par
 
     u64 words_extra_total = 0;
 
-    while (device_param->pws_cnt < device_param->kernel_power)
+    while (pws_cnt_next < device_param->kernel_power)
     {
       if (next_line >= buf_limit)
       {
@@ -311,7 +481,7 @@ static int calc_stdin (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_par
         }
       }
 
-      pw_add (device_param, (const u8 *) line_buf, (const int) line_len);
+      pw_add_raw (pws_comp_next, pws_idx_next, &pws_cnt_next, (const u8 *) line_buf, (const int) line_len);
 
       if (status_ctx->run_thread_level1 == false) break;
     }
@@ -328,32 +498,38 @@ static int calc_stdin (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_par
       hc_thread_mutex_unlock (status_ctx->mux_counter);
     }
 
-    if (status_ctx->run_thread_level1 == false) break;
+    crack_ctx_wait_idle (&crack_ctx);
 
-    if (device_param->pws_cnt == 0) break;
-
-    // flush
-
-    if (run_copy (hashcat_ctx, device_param, device_param->pws_cnt) == -1)
-    {
-      ret = -1;
-
-      break;
-    }
-
-    if (run_cracker (hashcat_ctx, device_param, -1, device_param->pws_cnt) == -1) // no pws_pos?
-    {
-      ret = -1;
-
-      break;
-    }
-
-    device_param->pws_cnt = 0;
+    if (crack_ctx.err == true) break;
 
     if (status_ctx->run_thread_level1 == false) break;
 
     if (device_param->speed_only_finish == true) break;
+
+    if (pws_cnt_next == 0) continue;
+
+    // flip/reset host password buffers
+
+    u32      *pws_comp_done = device_param->pws_comp;
+    pw_idx_t *pws_idx_done  = device_param->pws_idx;
+
+    device_param->pws_comp = pws_comp_next;
+    device_param->pws_idx  = pws_idx_next;
+    device_param->pws_cnt  = pws_cnt_next;
+
+    pws_comp_next = pws_comp_done;
+    pws_idx_next  = pws_idx_done;
+    pws_cnt_next  = 0;
+
+    // notify crack-thread of new work
+
+    crack_ctx_notify_work (&crack_ctx);
   }
+
+  crack_ctx_close (&crack_ctx, status_ctx->run_thread_level1);
+
+  device_param->pws_comp_b = pws_comp_next;
+  device_param->pws_idx_b  = pws_idx_next;
 
   device_param->kernel_accel_prev   = device_param->kernel_accel;
   device_param->kernel_loops_prev   = device_param->kernel_loops;
@@ -372,7 +548,9 @@ static int calc_stdin (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_par
 
   hcfree (in_buf_alloc);
 
-  return ret;
+  if (crack_ctx.err == true) return -1;
+
+  return 0;
 }
 
 HC_API_CALL void *thread_calc_stdin (void *p)

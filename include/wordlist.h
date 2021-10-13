@@ -14,6 +14,7 @@ size_t convert_from_hex (hashcat_ctx_t *hashcat_ctx, char *line_buf, const size_
 void pw_pre_add  (hc_device_param_t *device_param, const u8 *pw_buf, const int pw_len, const u8 *base_buf, const int base_len, const int rule_idx);
 void pw_base_add (hc_device_param_t *device_param, pw_pre_t *pw_pre);
 void pw_add      (hc_device_param_t *device_param, const u8 *pw_buf, const int pw_len);
+void pw_add_raw  (u32 *pws_comp, pw_idx_t *pws_idx, u64 *pws_cnt, const u8 *pw_buf, const int pw_len);
 
 void get_next_word_lm  (char *buf, u64 sz, u64 *len, u64 *off);
 void get_next_word_uc  (char *buf, u64 sz, u64 *len, u64 *off);

@@ -399,39 +399,43 @@ void pw_base_add (hc_device_param_t *device_param, pw_pre_t *pw_pre)
   }
 }
 
-void pw_add (hc_device_param_t *device_param, const u8 *pw_buf, const int pw_len)
+__attribute__ ((always_inline))
+inline void pw_add (hc_device_param_t *device_param, const u8 *pw_buf, const int pw_len)
 {
   if (device_param->pws_cnt < device_param->kernel_power)
   {
-    pw_idx_t *pw_idx = device_param->pws_idx + device_param->pws_cnt++;
-
-    const u32 pw_len4 = (pw_len + 3) & ~3; // round up to multiple of 4
-
-    const u32 pw_len4_cnt = pw_len4 / 4;
-
-    pw_idx->cnt = pw_len4_cnt;
-    pw_idx->len = pw_len;
-
-    u8 *pw_dest = (u8 *) (device_param->pws_comp + pw_idx->off);
-
-    buf_cpy (pw_dest, pw_buf, pw_len);
-
-    // pad zeros
-
-    *(u32 *) (pw_dest + pw_len) = 0;
-
-    // prepare next element
-
-    pw_idx_t *pw_idx_next = pw_idx + 1;
-
-    pw_idx_next->off = pw_idx->off + pw_idx->cnt;
+    pw_add_raw (device_param->pws_comp, device_param->pws_idx, &device_param->pws_cnt, pw_buf, pw_len);
   }
   else
   {
     fprintf (stderr, "BUG pw_add()!!\n");
-
-    return;
   }
+}
+
+void pw_add_raw (u32 *pws_comp, pw_idx_t *pws_idx, u64 *pws_cnt, const u8 *pw_buf, const int pw_len)
+{
+  pw_idx_t *pw_idx = pws_idx + (*pws_cnt)++;
+
+  const u32 pw_len4 = (pw_len + 3) & ~3; // round up to multiple of 4
+
+  const u32 pw_len4_cnt = pw_len4 / 4;
+
+  pw_idx->cnt = pw_len4_cnt;
+  pw_idx->len = pw_len;
+
+  u8 *pw_dest = (u8 *) (pws_comp + pw_idx->off);
+
+  buf_cpy (pw_dest, pw_buf, pw_len);
+
+  // pad zeros
+
+  *(u32 *) (pw_dest + pw_len) = 0;
+
+  // prepare next element
+
+  pw_idx_t *pw_idx_next = pw_idx + 1;
+
+  pw_idx_next->off = pw_idx->off + pw_idx->cnt;
 }
 
 int count_words (hashcat_ctx_t *hashcat_ctx, HCFILE *fp, const char *dictfile, u64 *result)
