@@ -403,7 +403,7 @@ void pw_add (hc_device_param_t *device_param, const u8 *pw_buf, const int pw_len
 {
   if (device_param->pws_cnt < device_param->kernel_power)
   {
-    pw_idx_t *pw_idx = device_param->pws_idx + device_param->pws_cnt;
+    pw_idx_t *pw_idx = device_param->pws_idx + device_param->pws_cnt++;
 
     const u32 pw_len4 = (pw_len + 3) & ~3; // round up to multiple of 4
 
@@ -412,19 +412,19 @@ void pw_add (hc_device_param_t *device_param, const u8 *pw_buf, const int pw_len
     pw_idx->cnt = pw_len4_cnt;
     pw_idx->len = pw_len;
 
-    u8 *dst = (u8 *) (device_param->pws_comp + pw_idx->off);
+    u8 *pw_dest = (u8 *) (device_param->pws_comp + pw_idx->off);
 
-    memcpy (dst, pw_buf, pw_len);
+    buf_cpy (pw_dest, pw_buf, pw_len);
 
-    memset (dst + pw_len, 0, pw_len4 - pw_len);
+    // pad zeros
+
+    *(u32 *) (pw_dest + pw_len) = 0;
 
     // prepare next element
 
     pw_idx_t *pw_idx_next = pw_idx + 1;
 
     pw_idx_next->off = pw_idx->off + pw_idx->cnt;
-
-    device_param->pws_cnt++;
   }
   else
   {

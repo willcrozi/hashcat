@@ -155,7 +155,7 @@ static int calc_stdin (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_par
   const u32 attack_mode = user_options->attack_mode;
   const u32 attack_kern = user_options_extra->attack_kern;
 
-  char *buf = (char *) hcmalloc (HCBUFSIZ_LARGE);
+  char *buf = (char *) hcmalloc (HCBUFSIZ_LARGE + sizeof (char16)); // +16 to allow vector read overrun
 
   bool iconv_enabled = false;
 

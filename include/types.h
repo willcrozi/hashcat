@@ -52,6 +52,8 @@ typedef int16_t i16;
 typedef int32_t i32;
 typedef int64_t i64;
 
+typedef char char16 __attribute__ ((vector_size (16), aligned (1)));
+
 #include "inc_types.h"
 
 // there's no such thing in plain C, therefore all vector operation cannot work in this emu

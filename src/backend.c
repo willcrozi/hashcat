@@ -16314,7 +16314,7 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
 
       // size_pws_comp
 
-      size_pws_comp = kernel_power_max * (sizeof (u32) * 64);
+      size_pws_comp = (kernel_power_max * (sizeof (u32) * 64)) + sizeof (char16); // +16 to allow vector write overrun
 
       // size_pws_idx
 
