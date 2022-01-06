@@ -319,6 +319,28 @@ static int inner2_loop (hashcat_ctx_t *hashcat_ctx)
   status_ctx->runtime_start = runtime_start;
 
   /**
+   * prepare stdin context (if required)
+   */
+
+  stdin_ctx_t *stdin_ctx = NULL;
+
+  if (user_options_extra->wordlist_mode == WL_MODE_STDIN)
+  {
+    stdin_ctx = (stdin_ctx_t *) hccalloc (1, sizeof (stdin_ctx_t));
+
+    if (stdin_open (stdin_ctx) == -1)
+    {
+      hcfree (stdin_ctx);
+
+      hcfree (c_threads);
+
+      hcfree (threads_param);
+
+      return -1;
+    }
+  }
+
+  /**
    * create cracker threads
    */
 
@@ -334,6 +356,7 @@ static int inner2_loop (hashcat_ctx_t *hashcat_ctx)
 
     thread_param->hashcat_ctx = hashcat_ctx;
     thread_param->tid         = backend_devices_idx;
+    thread_param->stdin_ctx   = stdin_ctx;
 
     if (user_options_extra->wordlist_mode == WL_MODE_STDIN)
     {
@@ -346,6 +369,13 @@ static int inner2_loop (hashcat_ctx_t *hashcat_ctx)
   }
 
   hc_thread_wait (backend_ctx->backend_devices_cnt, c_threads);
+
+  if (user_options_extra->wordlist_mode == WL_MODE_STDIN)
+  {
+    stdin_close (stdin_ctx);
+
+    hcfree (stdin_ctx);
+  }
 
   hcfree (c_threads);
 

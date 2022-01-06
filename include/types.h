@@ -3197,11 +3197,14 @@ typedef struct hashcat_ctx
 
 } hashcat_ctx_t;
 
+#include "stdin.h"
+
 typedef struct thread_param
 {
   u32 tid;
 
   hashcat_ctx_t *hashcat_ctx;
+  stdin_ctx_t   *stdin_ctx;
 
 } thread_param_t;
 

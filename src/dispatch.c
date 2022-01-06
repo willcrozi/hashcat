@@ -15,6 +15,7 @@
 #include "rp.h"
 #include "rp_cpu.h"
 #include "slow_candidates.h"
+#include "stdin.h"
 #include "dispatch.h"
 
 #ifdef WITH_BRAIN
@@ -143,7 +144,7 @@ static u64 get_work (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param
   return work;
 }
 
-static int calc_stdin (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param)
+static int calc_stdin (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, stdin_ctx_t *stdin_ctx)
 {
   user_options_t       *user_options       = hashcat_ctx->user_options;
   user_options_extra_t *user_options_extra = hashcat_ctx->user_options_extra;
@@ -154,8 +155,6 @@ static int calc_stdin (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_par
 
   const u32 attack_mode = user_options->attack_mode;
   const u32 attack_kern = user_options_extra->attack_kern;
-
-  char *buf = (char *) hcmalloc (HCBUFSIZ_LARGE + sizeof (char16)); // +16 to allow vector read overrun
 
   bool iconv_enabled = false;
 
@@ -169,21 +168,22 @@ static int calc_stdin (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_par
 
     iconv_ctx = iconv_open (user_options->encoding_to, user_options->encoding_from);
 
-    if (iconv_ctx == (iconv_t) -1)
-    {
-      hcfree (buf);
-
-      return -1;
-    }
+    if (iconv_ctx == (iconv_t) -1) return -1;
 
     iconv_tmp = (char *) hcmalloc (HCBUFSIZ_TINY);
   }
+
+  // password input main loop
+
+  int ret = 0;
+
+  int read_success_cnt = 0;
 
   while (status_ctx->run_thread_level1 == true)
   {
     hc_thread_mutex_lock (status_ctx->mux_dispatcher);
 
-    if (feof (stdin) != 0)
+    if (stdin_ctx->eof == true)
     {
       hc_thread_mutex_unlock (status_ctx->mux_dispatcher);
 
@@ -192,37 +192,50 @@ static int calc_stdin (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_par
 
     u64 words_extra_total = 0;
 
-    #define DISABLE_READ_TIMEOUT_AFTER 1000
-
-    int selects_returned = 0;
-
     while (device_param->pws_cnt < device_param->kernel_power)
     {
-      if (selects_returned < DISABLE_READ_TIMEOUT_AFTER)
+      if (stdin_unchecked_len (stdin_ctx) == 0)
       {
-        const int rc_select = select_read_timeout_console (1);
+        int read_cnt = stdin_read (stdin_ctx);
 
-        if (rc_select == -1) break;
-
-        if (rc_select == 0)
+        if (read_cnt <= 0)
         {
-          if (status_ctx->run_thread_level1 == false) break;
+          if (read_cnt == 0)
+          {
+            if (status_ctx->run_thread_level1 == false) break;
 
-          status_ctx->stdin_read_timeout_cnt++;
+            status_ctx->stdin_read_timeout_cnt++;
 
-          continue;
+            continue;
+          }
+
+          stdin_ctx->eof = true;
+
+          break;
         }
 
         status_ctx->stdin_read_timeout_cnt = 0;
 
-        selects_returned++;
+        #define DISABLE_READ_TIMEOUT_AFTER 1000
+
+        if (read_success_cnt < DISABLE_READ_TIMEOUT_AFTER)
+        {
+          read_success_cnt++;
+
+          if (read_success_cnt == DISABLE_READ_TIMEOUT_AFTER)
+          {
+            user_options->stdin_timeout_abort = 0;
+          }
+        }
       }
 
-      char *line_buf = fgets (buf, HCBUFSIZ_LARGE - 1, stdin);
+      size_t line_len;
 
-      if (line_buf == NULL) break;
+      char *line_buf = stdin_next_line (stdin_ctx, &line_len);
 
-      size_t line_len = in_superchop (line_buf);
+      if (line_buf == NULL) continue;
+
+      // full line found, line_buf & line_len are valid until next call to stdin_read/stdin_close
 
       line_len = convert_from_hex (hashcat_ctx, line_buf, (u32) line_len);
 
@@ -307,16 +320,16 @@ static int calc_stdin (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_par
 
     if (run_copy (hashcat_ctx, device_param, device_param->pws_cnt) == -1)
     {
-      hcfree (buf);
+      ret = -1;
 
-      return -1;
+      break;
     }
 
     if (run_cracker (hashcat_ctx, device_param, -1, device_param->pws_cnt) == -1) // no pws_pos?
     {
-      hcfree (buf);
+      ret = -1;
 
-      return -1;
+      break;
     }
 
     device_param->pws_cnt = 0;
@@ -341,9 +354,7 @@ static int calc_stdin (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_par
     hcfree (iconv_tmp);
   }
 
-  hcfree (buf);
-
-  return 0;
+  return ret;
 }
 
 HC_API_CALL void *thread_calc_stdin (void *p)
@@ -351,6 +362,7 @@ HC_API_CALL void *thread_calc_stdin (void *p)
   thread_param_t *thread_param = (thread_param_t *) p;
 
   hashcat_ctx_t *hashcat_ctx = thread_param->hashcat_ctx;
+  stdin_ctx_t   *stdin_ctx   = thread_param->stdin_ctx;
   backend_ctx_t *backend_ctx = hashcat_ctx->backend_ctx;
   bridge_ctx_t  *bridge_ctx  = hashcat_ctx->bridge_ctx;
   hashconfig_t  *hashconfig  = hashcat_ctx->hashconfig;
@@ -381,7 +393,7 @@ HC_API_CALL void *thread_calc_stdin (void *p)
     if (hc_hipSetDevice (hashcat_ctx, device_param->hip_device) == -1) return NULL;
   }
 
-  if (calc_stdin (hashcat_ctx, device_param) == -1)
+  if (calc_stdin (hashcat_ctx, device_param, stdin_ctx) == -1)
   {
     status_ctx_t *status_ctx = hashcat_ctx->status_ctx;
 
