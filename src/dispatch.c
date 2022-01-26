@@ -3,6 +3,8 @@
  * License.....: MIT
  */
 
+#include <assert.h>
+
 #include "common.h"
 #include "types.h"
 #include "event.h"
@@ -144,6 +146,15 @@ static u64 get_work (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param
   return work;
 }
 
+static void *buf_align (void *buf, u16 align)
+{
+  if (align <= 1) return buf;
+
+  u16 offset = (uintptr_t) buf % align;
+
+  return buf + ((align - offset) % align);
+}
+
 static int calc_stdin (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, stdin_ctx_t *stdin_ctx)
 {
   user_options_t       *user_options       = hashcat_ctx->user_options;
@@ -155,6 +166,21 @@ static int calc_stdin (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_par
 
   const u32 attack_mode = user_options->attack_mode;
   const u32 attack_kern = user_options_extra->attack_kern;
+
+  // initialize stdin buffer and cursors
+
+  char *in_buf_alloc = hccalloc (1, STDIN_BUF_ALLOC_SZ);
+
+  if (in_buf_alloc == NULL) return -1;
+
+  char *restrict in_buf = buf_align (in_buf_alloc + 1, STDIN_BLK_SZ);
+
+  *(in_buf - 1) = '\n'; // prepend sentinel
+
+  char *next_line = in_buf;
+  char *buf_limit = in_buf;
+
+  // setup iconv
 
   bool iconv_enabled = false;
 
@@ -168,7 +194,12 @@ static int calc_stdin (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_par
 
     iconv_ctx = iconv_open (user_options->encoding_to, user_options->encoding_from);
 
-    if (iconv_ctx == (iconv_t) -1) return -1;
+    if (iconv_ctx == (iconv_t) -1)
+    {
+      hcfree (in_buf_alloc);
+
+      return -1;
+    }
 
     iconv_tmp = (char *) hcmalloc (HCBUFSIZ_TINY);
   }
@@ -177,65 +208,52 @@ static int calc_stdin (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_par
 
   int ret = 0;
 
-  int read_success_cnt = 0;
+  bool eof = false;
+
+  hc_thread_cond_t cond_read;
+
+  hc_thread_cond_init (&cond_read);
 
   while (status_ctx->run_thread_level1 == true)
   {
-    hc_thread_mutex_lock (status_ctx->mux_dispatcher);
-
-    if (stdin_ctx->eof == true)
-    {
-      hc_thread_mutex_unlock (status_ctx->mux_dispatcher);
-
-      break;
-    }
+    if (eof == true) break;
 
     u64 words_extra_total = 0;
 
     while (device_param->pws_cnt < device_param->kernel_power)
     {
-      if (stdin_unchecked_len (stdin_ctx) == 0)
+      if (next_line >= buf_limit)
       {
-        int read_cnt = stdin_read (stdin_ctx);
+        // assert (next_line <= (buf_limit + 1)); // next_line can be buf_limit + 1 if sentinel was hit
 
-        if (read_cnt <= 0)
+        stdin_result_t result;
+
+        result = stdin_read (stdin_ctx, in_buf, &cond_read);
+
+        if (result.cnt <= 0)
         {
-          if (read_cnt == 0)
-          {
-            if (status_ctx->run_thread_level1 == false) break;
-
-            status_ctx->stdin_read_timeout_cnt++;
-
-            continue;
-          }
-
-          stdin_ctx->eof = true;
+          if (result.cnt == -1) eof = true;
 
           break;
         }
 
-        status_ctx->stdin_read_timeout_cnt = 0;
-
-        #define DISABLE_READ_TIMEOUT_AFTER 1000
-
-        if (read_success_cnt < DISABLE_READ_TIMEOUT_AFTER)
-        {
-          read_success_cnt++;
-
-          if (read_success_cnt == DISABLE_READ_TIMEOUT_AFTER)
-          {
-            user_options->stdin_timeout_abort = 0;
-          }
-        }
+        next_line = result.start;
+        buf_limit = next_line + result.cnt;
       }
 
-      size_t line_len;
+      // move to the next line (relies on '\n' sentinel)
 
-      char *line_buf = stdin_next_line (stdin_ctx, &line_len);
+      char *line_buf = next_line;
 
-      if (line_buf == NULL) continue;
+      char prev = '\0';
 
-      // full line found, line_buf & line_len are valid until next call to stdin_read/stdin_close
+      while (*next_line != '\n') prev = *next_line++;
+
+      size_t line_len = next_line - line_buf;
+
+      if (prev == '\r') line_len--;
+
+      next_line++;
 
       line_len = convert_from_hex (hashcat_ctx, line_buf, (u32) line_len);
 
@@ -298,8 +316,6 @@ static int calc_stdin (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_par
       if (status_ctx->run_thread_level1 == false) break;
     }
 
-    hc_thread_mutex_unlock (status_ctx->mux_dispatcher);
-
     if (words_extra_total > 0)
     {
       hc_thread_mutex_lock (status_ctx->mux_counter);
@@ -353,6 +369,8 @@ static int calc_stdin (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_par
 
     hcfree (iconv_tmp);
   }
+
+  hcfree (in_buf_alloc);
 
   return ret;
 }

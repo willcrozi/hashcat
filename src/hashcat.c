@@ -328,7 +328,7 @@ static int inner2_loop (hashcat_ctx_t *hashcat_ctx)
   {
     stdin_ctx = (stdin_ctx_t *) hccalloc (1, sizeof (stdin_ctx_t));
 
-    if (stdin_open (stdin_ctx) == -1)
+    if (stdin_open (stdin_ctx, hashcat_ctx) == -1)
     {
       hcfree (stdin_ctx);
 
