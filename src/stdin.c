@@ -20,8 +20,38 @@
 
 #define READ_TIMEOUT_SEC 1
 
+#define REQS_IDX_MASK (DEVICES_MAX - 1)
+
+// forward declarations
+
+static void *thread_stdin_read (void *p);
+static i32   stdin_read (stdin_ctx_t *stdin_ctx, char *dst, u32 len);
+static i32   stdin_os_read (const stdin_ctx_t *stdin_ctx, char *dst, u32 len);
+
+static inline i32 split_tail (const char **restrict end, char *restrict tail_dst);
+
 int stdin_open (stdin_ctx_t *stdin_ctx, hashcat_ctx_t *hashcat_ctx)
 {
+  // capacity of ring buffer for waiting requests must be a power-of-two (uses unsigned overflow)
+
+  assert (power_of_two_ceil_32 (DEVICES_MAX) == DEVICES_MAX);
+
+  stdin_ctx->reqs_head = 0;
+  stdin_ctx->reqs_tail = 0;
+
+  hc_thread_mutex_init (stdin_ctx->mux_request);
+  hc_thread_cond_init  (&stdin_ctx->cond_request);
+
+  hc_thread_mutex_init (stdin_ctx->mux_result);
+
+  stdin_ctx->eof  = false;
+  stdin_ctx->stop = false;
+
+  stdin_ctx->read_success_cnt = 0;
+
+  stdin_ctx->hashcat_ctx = hashcat_ctx;
+  stdin_ctx->status_ctx  = hashcat_ctx->status_ctx;
+
   #if defined (_WIN)
   stdin_ctx->hnd = GetStdHandle (STD_INPUT_HANDLE);
 
@@ -59,29 +89,20 @@ int stdin_open (stdin_ctx_t *stdin_ctx, hashcat_ctx_t *hashcat_ctx)
 
   #endif
 
-  stdin_ctx->partial_len = 0;
-
-  stdin_ctx->eof  = false;
-
-  // the ring buffer for wait-conditions uses unsigned integer overflow and so its capacity, DEVICES_MAX,
-  // must be a power-of-two
-
-  assert (power_of_two_ceil_32 (DEVICES_MAX) == DEVICES_MAX);
-
-  hc_thread_mutex_init (stdin_ctx->mux_read);
-
-  stdin_ctx->wait_head = 0;
-  stdin_ctx->wait_tail = 0;
-
-  stdin_ctx->hashcat_ctx = hashcat_ctx;
-
-  stdin_ctx->read_success_cnt = 0;
+  hc_thread_create (stdin_ctx->read_thread, thread_stdin_read, (void *) stdin_ctx);
 
   return 0;
 }
 
 void stdin_close (stdin_ctx_t *stdin_ctx)
 {
+  stdin_stop (stdin_ctx);
+
+  hc_thread_cond_close (&stdin_ctx->cond_request);
+
+  hc_thread_mutex_delete (stdin_ctx->mux_request);
+  hc_thread_mutex_delete (stdin_ctx->mux_result);
+
   #if defined (_WIN)
   if (stdin_ctx->read_event != NULL)
   {
@@ -98,10 +119,273 @@ void stdin_close (stdin_ctx_t *stdin_ctx)
   #endif
 }
 
+void stdin_stop (stdin_ctx_t *stdin_ctx)
+{
+  hc_thread_mutex_lock (stdin_ctx->mux_request);
+  hc_thread_mutex_lock (stdin_ctx->mux_result);
+
+  if (stdin_ctx->stop == false)
+  {
+    stdin_ctx->eof  = true;
+    stdin_ctx->stop = true;
+
+    #if defined (_WIN)
+    // TODO possibly only required for windows console IO...
+    CancelIoEx (stdin_ctx->hnd, NULL);
+
+    SetEvent (stdin_ctx->read_event);
+    #endif
+
+    hc_thread_cond_notify (&stdin_ctx->cond_request);
+
+    while (stdin_ctx->reqs_head != stdin_ctx->reqs_tail)
+    {
+      stdin_req_t *req = &stdin_ctx->requests[stdin_ctx->reqs_head++ & REQS_IDX_MASK];
+
+      hc_thread_cond_notify (req->result->cond);
+    }
+
+    hc_thread_mutex_unlock (stdin_ctx->mux_request);
+    hc_thread_mutex_unlock (stdin_ctx->mux_result);
+  }
+}
+
+void stdin_wait_exit (stdin_ctx_t *stdin_ctx)
+{
+  // wait for stdin_ctx's read-thread to exit, called by host dispatch/device threads before
+  // being able to safely clean up result buffer and wait-condition
+
+  hc_thread_cond_notify (&stdin_ctx->cond_request); // belt-and-braces
+
+  hc_thread_wait (1, &stdin_ctx->read_thread);
+}
+
+void stdin_read_request (stdin_ctx_t *stdin_ctx, char *buf, stdin_result_t *result)
+{
+  // registers a request for (full) lines to be read into buf from stdin with the result
+  // to be placed into *result, this operation always succeeds resulting in a valid
+  // result object to be used for waiting/cancellation
+  //
+  // no external locking required when called from multiple threads but any given thread
+  // must call stdin_read_wait() between successive calls to this function
+
+  // NOTE: requires that the memory locations buf[-1] and buf[buf_len] are valid and part of
+  //       the same array object as the the range buf[0] ... buf[buf_len - 1] (this is for
+  //       prepending/appending '\n' sentinel bytes immediately before and after the buffer
+
+  hc_thread_mutex_lock (stdin_ctx->mux_request);
+
+  stdin_req_t *req = &stdin_ctx->requests[stdin_ctx->reqs_tail++ & REQS_IDX_MASK];
+
+  result->buf = NULL;
+  result->cnt = 0;
+
+  req->buf    = buf;
+  req->result = result;
+
+  hc_thread_mutex_unlock (stdin_ctx->mux_request);
+
+  hc_thread_cond_notify (&stdin_ctx->cond_request);
+}
+
+void stdin_read_wait (stdin_ctx_t *stdin_ctx, stdin_result_t *result)
+{
+  // blocks until the request specified by req has completed or failed, the first
+  // line begins at result->buf and the total byte-length of data indicated by
+  // result->cnt, result->cnt == -1 indicates io-error/eof and that no data was
+  // written to result->buf
+  //
+  // the final line (before eof) is guaranteed to have a trailing '\n' even if the
+  // input did not
+
+  hc_thread_mutex_lock (stdin_ctx->mux_result);
+
+  while (result->buf == NULL)
+  {
+    if (stdin_ctx->eof == false)
+    {
+      hc_thread_cond_wait (result->cond, stdin_ctx->mux_result);
+    }
+    else
+    {
+      result->cnt = RESULT_EOF;
+
+      break;
+    }
+  }
+
+  hc_thread_mutex_unlock (stdin_ctx->mux_result);
+}
+
+// stdin reader thread
+
+static void *thread_stdin_read (void *p)
+{
+  stdin_ctx_t  *stdin_ctx  = (stdin_ctx_t *) p;
+  status_ctx_t *status_ctx = stdin_ctx->status_ctx;
+
+  bool eof  = false;
+  bool done = false;
+
+  #define PARTIAL_BUF_SZ (PW_MAX + sizeof (char16)) // allow vector overrun on read/write
+
+  char partial[PARTIAL_BUF_SZ]; // partial line carried over from previous request
+  i32  partial_len = 0;         // length of partial line, value of -1 indicates skipping over-length line
+
+  char *restrict dest     = NULL; // write cursor for current request
+  char *restrict dest_lim = NULL; // write limit for cursor
+
+  stdin_req_t req = (stdin_req_t) { .buf = NULL, .result = NULL };
+
+  while (done == false)
+  {
+    if (status_ctx->run_thread_level1 == false) break; // completion/abort
+
+    // get next request
+
+    hc_thread_mutex_lock (stdin_ctx->mux_request);
+
+    while (stdin_ctx->reqs_head == stdin_ctx->reqs_tail)
+    {
+      if (status_ctx->run_thread_level1 == true)
+      {
+        hc_thread_cond_wait (&stdin_ctx->cond_request, stdin_ctx->mux_request);
+      }
+      else
+      {
+        hc_thread_mutex_unlock (stdin_ctx->mux_request);
+
+        goto exit;
+      }
+    }
+
+    req = stdin_ctx->requests[stdin_ctx->reqs_head++ & REQS_IDX_MASK];
+
+    hc_thread_mutex_unlock (stdin_ctx->mux_request);
+
+    dest     = req.buf;
+    dest_lim = dest + STDIN_BUF_SZ;
+
+    if (partial_len > 0)
+    {
+      buf_cpy (dest, &partial[0], partial_len);
+
+      dest += partial_len;
+    }
+
+    // read in data
+
+    if (eof == false)
+    {
+      while (dest < dest_lim)
+      {
+        u32 read_len = dest_lim - dest;
+
+        // assert (read_len <= STDIN_BUF_SZ);
+
+        i32 read_cnt = stdin_read (stdin_ctx, dest, read_len);
+
+        if (read_cnt > 0)
+        {
+          dest += read_cnt;
+        }
+        else
+        {
+          if (read_cnt == 0)
+          {
+            // timeout TODO timeout-flush
+
+            if (status_ctx->run_thread_level1 == true) continue;
+          }
+
+          eof = true;
+
+          break;
+        }
+      }
+    }
+
+    *dest = '\n'; // sentinel
+
+    // perform skip if needed
+
+    if (partial_len == -1)
+    {
+      while (*req.buf++ != '\n');
+
+      if (req.buf < dest) partial_len = 0; // newline was found, password rejected
+    }
+
+    // prepare result, splitting and storing any trailing partial line bytes
+
+    partial_len = split_tail ((const char **) &dest, &partial[0]);
+
+    // set result and notify waiting device thread
+
+    stdin_result_t *result = req.result;
+
+    i32 cnt = (i32) (dest - req.buf);
+
+    hc_thread_mutex_lock (stdin_ctx->mux_result);
+
+    result->buf = req.buf;
+    result->cnt = cnt;
+
+    stdin_ctx->eof = done;
+
+    hc_thread_cond_notify (result->cond);
+
+    hc_thread_mutex_unlock (stdin_ctx->mux_result);
+
+    done = (eof == true) & (partial_len == 0);
+  }
+
+  exit:
+
+  stdin_stop (stdin_ctx);
+
+  return NULL;
+}
+
+// helpers
+
+static i32 stdin_read (stdin_ctx_t *stdin_ctx, char *dst, u32 len)
+{
+  // returns count of bytes read, or -1 if eof/error
+
+  i32 read_cnt = stdin_os_read (stdin_ctx, dst, len);
+
+  status_ctx_t *status_ctx = stdin_ctx->status_ctx;
+
+  if (read_cnt > 0)
+  {
+    status_ctx->stdin_read_timeout_cnt = 0;
+
+    stdin_ctx->read_success_cnt++;
+
+    #define DISABLE_TIMEOUT_ABORT_AFTER 1000
+
+    if (stdin_ctx->read_success_cnt == DISABLE_TIMEOUT_ABORT_AFTER)
+    {
+      user_options_t *user_options = stdin_ctx->hashcat_ctx->user_options;
+
+      user_options->stdin_timeout_abort = 0;
+    }
+  }
+  else if (read_cnt == 0)
+  {
+    // timeout
+
+    status_ctx->stdin_read_timeout_cnt += 1;
+  }
+
+  return read_cnt;
+}
+
 #if defined (_WIN)
 static i32 stdin_os_read (const stdin_ctx_t *stdin_ctx, char *dst, u32 len)
 {
-  i32 read_cnt = 0;
+  DWORD read_cnt = 0;
 
   if (stdin_ctx->is_console == false)
   {
@@ -159,7 +443,7 @@ static i32 stdin_os_read (const stdin_ctx_t *stdin_ctx, char *dst, u32 len)
     }
   }
 
-  return read_cnt;
+  return (i32) read_cnt;
 }
 
 #else
@@ -192,164 +476,35 @@ static i32 stdin_os_read (const stdin_ctx_t *stdin_ctx, char *dst, u32 len)
 
 #endif
 
-stdin_result_t stdin_read (stdin_ctx_t *stdin_ctx, char *restrict buf, hc_thread_cond_t *cond)
+static inline i32 split_tail (const char **restrict end, char *restrict tail_dst)
 {
-  // reads full lines into buf from stdin, returning a result object with pointer to first
-  // line and byte length of data, the final line (before eof) is guaranteed to have a
-  // trailing '\n' even if the input did not
+  // scans backwards from (*end - 1) and updates *end to point to character after
+  // the trailing newline (or prepended sentinel '\n' char)
   //
-  // result.cnt == -1 indicates eof (no data copied to buf and result.start is undefined)
+  // if the count of trailing bytes <= PW_MAX then the bytes are copied to tail_dst and the copy
+  // count is returned, otherwise no bytes are copied and -1 is returned
+  //
+  // must be used with a sentinel '\n' at the front of the array-object pointed to by *end - 1
 
-  // NOTE: requires that the memory locations &buf[-1] and &buf[buf_len] are valid and part of
-  //       the same array object as the the range buf[0] ... buf[buf_len - 1] (this is for
-  //       prepending/appending '\n' sentinel bytes immediately before the buffer and after
-  //       the data
+  const char *restrict trim = *end;
 
-  status_ctx_t   *status_ctx   = stdin_ctx->hashcat_ctx->status_ctx;
-  user_options_t *user_options = stdin_ctx->hashcat_ctx->user_options;
+  while (*(--trim) != '\n') {}; // relies on prepended sentinel '\n'
 
-  stdin_result_t result;
+  trim++;
 
-  char *dst   = buf;
-  char *limit = buf + STDIN_BUF_SZ;
+  i32 tail_len = (i32) (*end - trim);
 
-  #define WAIT_MASK (DEVICES_MAX - 1)
+  *end = trim;
 
-  // acquire the read 'lock', queueing if necessary
-
-  hc_thread_mutex_lock (stdin_ctx->mux_read);
-
-  u8 wait_pos = stdin_ctx->wait_tail++;
-
-  // assert ((stdin_ctx->wait_tail - stdin_ctx->wait_head) < DEVICES_MAX); // waiter ring-buffer range check
-
-  stdin_ctx->waiting[wait_pos & WAIT_MASK] = cond;
-
-  while (stdin_ctx->wait_head != wait_pos)
+  if (tail_len <= PW_MAX)
   {
-    hc_thread_cond_wait (cond, stdin_ctx->mux_read);
-  }
+    buf_cpy (tail_dst, trim, tail_len);
 
-  // start of 'locked' section (only a single device thread executes here)
-
-  bool eof = stdin_ctx->eof;
-
-  hc_thread_mutex_unlock (stdin_ctx->mux_read);
-
-  // prepend previous partial line data if present
-
-  if (stdin_ctx->partial_len > 0)
-  {
-    buf_cpy (dst, &stdin_ctx->partial[0], stdin_ctx->partial_len);
-
-    dst += stdin_ctx->partial_len;
-
-    stdin_ctx->partial_len = 0;
-  }
-
-  // read data from stdin
-
-  if (eof == false)
-  {
-    while (dst < limit)
-    {
-      if (status_ctx->run_thread_level1 == false) break;
-
-      u32 read_len = limit - dst;
-
-      i32 read_cnt = stdin_os_read (stdin_ctx, dst, read_len);
-
-      if (read_cnt > 0)
-      {
-        status_ctx->stdin_read_timeout_cnt = 0;
-
-        if (user_options->stdin_timeout_abort > 0)
-        {
-          #define DISABLE_READ_TIMEOUT_AFTER 1000
-
-          stdin_ctx->read_success_cnt++;
-
-          if (stdin_ctx->read_success_cnt == DISABLE_READ_TIMEOUT_AFTER) user_options->stdin_timeout_abort = 0;
-        }
-
-        dst += read_cnt;
-      }
-      else
-      {
-        eof = read_cnt < 0;
-
-        if (eof == true) break;
-
-        status_ctx->stdin_read_timeout_cnt++; // timeout (TODO: flushing)
-      }
-    }
+    return tail_len;
   }
   else
   {
-    // eof and no partial data
-
-    result.cnt = -1;
-
-    goto release_exit;
+    return -1;
   }
 
-  *dst = '\n'; // sentinel
-
-  // skip to next line if previous partial length exceeded PW_MAX
-
-  if (stdin_ctx->partial_len == -1)
-  {
-    while (*buf++ != '\n') {}
-
-    // TODO instead of returning empty result below we could jump back to read section
-    //      above (would require another label and goto)
-
-    if (buf > dst) buf = dst; // sentinel hit (no newline), return empty result
-  }
-
-  // trim and store trailing partial line bytes
-
-  const char *dst_prev = dst;
-
-  while (*--dst != '\n') {}
-
-  dst++;
-
-  i32 trim_cnt = (i32) (dst_prev - dst);
-
-  stdin_ctx->partial_len = (trim_cnt <= PW_MAX) ? trim_cnt : -1;
-
-  if (stdin_ctx->partial_len > 0)
-  {
-    buf_cpy (&stdin_ctx->partial[0], dst, trim_cnt);
-  }
-
-  result = (stdin_result_t) { .start = buf, .cnt = (i32) (dst - buf) };
-
-  // end of 'locked' section
-
-  release_exit:
-
-  hc_thread_mutex_lock (stdin_ctx->mux_read);
-
-  // check that either output data has trailing/sentinel newline, or eof is signalled
-
-  // assert (*(buf + (result.cnt - 1)) == '\n' || *(buf + result.cnt) == '\n' || (result.cnt == -1));
-
-  stdin_ctx->eof = eof;
-
-  // notify next waiting device thread
-
-  stdin_ctx->wait_head++;
-
-  if (stdin_ctx->wait_head != stdin_ctx->wait_tail)
-  {
-    hc_thread_cond_t *waiter_nxt = stdin_ctx->waiting[stdin_ctx->wait_head & WAIT_MASK];
-
-    hc_thread_cond_notify (waiter_nxt);
-  }
-
-  hc_thread_mutex_unlock (stdin_ctx->mux_read);
-
-  return result;
 }

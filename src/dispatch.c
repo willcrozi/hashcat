@@ -20,6 +20,8 @@
 #include "stdin.h"
 #include "dispatch.h"
 
+#include "assert.h"
+
 #ifdef WITH_BRAIN
 #include "brain.h"
 #endif
@@ -319,16 +321,25 @@ static int calc_stdin (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_par
   const u32 attack_mode = user_options->attack_mode;
   const u32 attack_kern = user_options_extra->attack_kern;
 
-  char *in_buf;
-  char *in_buf_alloc;
+  char *in_buf_cur;
+  char *in_buf_nxt;
+
+  char *in_buf_allocs[2];
 
   indexer_cfg_t indexer_cfg = get_indexer_cfg (user_options->stdin_fast);
 
   index_fn_t index_lines = indexer_cfg.index_lines;
 
-  pw_in_buf_alloc (&in_buf, &in_buf_alloc, STDIN_BUF_SZ, indexer_cfg.align, indexer_cfg.blk_sz);
+  pw_in_buf_alloc (&in_buf_cur, &in_buf_allocs[0], STDIN_BUF_SZ, indexer_cfg.align, indexer_cfg.blk_sz);
+  pw_in_buf_alloc (&in_buf_nxt, &in_buf_allocs[1], STDIN_BUF_SZ, indexer_cfg.align, indexer_cfg.blk_sz);
 
-  if (in_buf == NULL) return -1;
+  if ((in_buf_cur == NULL) || (in_buf_nxt == NULL))
+  {
+    hcfree (in_buf_allocs[0]);
+    hcfree (in_buf_allocs[1]);
+
+    return -1;
+  }
 
   // setup host post-processing params
 
@@ -358,7 +369,8 @@ static int calc_stdin (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_par
 
     if (host_proc_param.iconv_ctx == (iconv_t) -1)
     {
-      hcfree (in_buf_alloc);
+      hcfree (in_buf_allocs[0]);
+      hcfree (in_buf_allocs[1]);
 
       return -1;
     }
@@ -370,8 +382,8 @@ static int calc_stdin (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_par
 
   indexer_param_t indexer_param;
 
-  indexer_param.next_line   = in_buf;
-  indexer_param.buf_limit   = in_buf;
+  indexer_param.next_line   = in_buf_cur;
+  indexer_param.buf_limit   = in_buf_cur;
   indexer_param.pws_comp    = device_param->pws_comp_b;
   indexer_param.pws_idx     = device_param->pws_idx_b;
   indexer_param.pws_cnt     = 0;
@@ -391,20 +403,22 @@ static int calc_stdin (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_par
 
   crack_ctx_init (&crack_ctx, hashcat_ctx, device_param);
 
-  // stdin reader condvar
+  // stdin read/request setup
 
-  hc_thread_cond_t cond_read;
+  hc_thread_cond_t cond_result;
 
-  hc_thread_cond_init (&cond_read);
+  hc_thread_cond_init (&cond_result);
+
+  stdin_result_t result = (stdin_result_t) { .cond = &cond_result };
+
+  stdin_read_request (stdin_ctx, in_buf_nxt, &result); // initial request
 
   // password input main loop
 
   bool eof = false;
 
-  while (status_ctx->run_thread_level1 == true)
+  while (eof == false)
   {
-    if (eof == true) break;
-
     u64 words_extra_total = 0;
 
     while (indexer_param.pws_cnt < indexer_param.pws_cnt_max)
@@ -413,19 +427,32 @@ static int calc_stdin (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_par
 
       if (indexer_param.next_line >= indexer_param.buf_limit)
       {
-        stdin_result_t result;
+        assert (indexer_param.next_line <= (indexer_param.buf_limit + 1)); // next_line can be buf_limit + 1 if sentinel was hit
 
-        result = stdin_read (stdin_ctx, in_buf, &cond_read);
+        stdin_read_wait (stdin_ctx, &result);
 
-        if (result.cnt <= 0)
+        // flip input buffers if there is new data, otherwise retry with current buffers
+
+        if (result.cnt > 0)
         {
-          if (result.cnt == -1) eof = true;
+          char *tmp = in_buf_cur;
 
-          break;
+          in_buf_cur = in_buf_nxt;
+          in_buf_nxt = tmp;
+
+          indexer_param.next_line = result.buf;
+          indexer_param.buf_limit = result.buf + result.cnt;
+        }
+        else
+        {
+          eof |= (result.cnt < 0);
+
+          if (eof == true) break;
         }
 
-        indexer_param.next_line = result.start;
-        indexer_param.buf_limit = indexer_param.next_line + result.cnt;
+        stdin_read_request (stdin_ctx, in_buf_nxt, &result);
+
+        if (result.cnt == 0) continue; // retry waiting on read (TODO flushing)
       }
 
       // index and copy input passwords
@@ -495,7 +522,12 @@ static int calc_stdin (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_par
     hcfree (host_proc_param.iconv_tmp);
   }
 
-  hcfree (in_buf_alloc);
+  stdin_wait_exit (stdin_ctx);
+
+  hc_thread_cond_close (&cond_result);
+
+  hcfree (in_buf_allocs[0]);
+  hcfree (in_buf_allocs[1]);
 
   if (crack_ctx.err == true) return -1;
 
