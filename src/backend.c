@@ -16639,23 +16639,63 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
       device_param->h_tmps = h_tmps;
     }
 
-    u32 *pws_comp = (u32 *) hcmalloc (size_pws_comp);
+    // pinned allocation of host-side pwd/index buffers for CUDA, HIP, and non-POCL OpenCL devices
 
-    device_param->pws_comp = pws_comp;
-
-    pw_idx_t *pws_idx = (pw_idx_t *) hcmalloc (size_pws_idx);
-
-    device_param->pws_idx = pws_idx;
-
-    if (user_options_extra->wordlist_mode == WL_MODE_STDIN)
+    if (device_param->is_cuda == true)
     {
-      u32 *pws_comp_b = (u32 *) hcmalloc (size_pws_comp);
+      if (hc_cuMemHostAlloc (hashcat_ctx, (void **) &device_param->pws_comp, size_pws_comp, CU_MEMHOSTALLOC_PORTABLE) == -1) return -1;
+      if (hc_cuMemHostAlloc (hashcat_ctx, (void **) &device_param->pws_idx,  size_pws_idx,  CU_MEMHOSTALLOC_PORTABLE) == -1) return -1;
 
-      device_param->pws_comp_b = pws_comp_b;
+      if (user_options_extra->wordlist_mode == WL_MODE_STDIN)
+      {
+        if (hc_cuMemHostAlloc (hashcat_ctx, (void **) &device_param->pws_comp_b, size_pws_comp, CU_MEMHOSTALLOC_PORTABLE) == -1) return -1;
+        if (hc_cuMemHostAlloc (hashcat_ctx, (void **) &device_param->pws_idx_b,  size_pws_idx,  CU_MEMHOSTALLOC_PORTABLE) == -1) return -1;
+      }
+    }
+    else if (device_param->is_hip == true)
+    {
+      if (hc_hipHostMalloc (hashcat_ctx, (void **) &device_param->pws_comp, size_pws_comp, hipHostMallocPortable) == -1) return -1;
+      if (hc_hipHostMalloc (hashcat_ctx, (void **) &device_param->pws_idx,  size_pws_idx,  hipHostMallocPortable) == -1) return -1;
 
-      pw_idx_t *pws_idx_b = (pw_idx_t *) hcmalloc (size_pws_idx);
+      if (user_options_extra->wordlist_mode == WL_MODE_STDIN)
+      {
+        if (hc_hipHostMalloc (hashcat_ctx, (void **) &device_param->pws_comp_b, size_pws_comp, hipHostMallocPortable) == -1) return -1;
+        if (hc_hipHostMalloc (hashcat_ctx, (void **) &device_param->pws_idx_b,  size_pws_idx,  hipHostMallocPortable) == -1) return -1;
+      }
+    }
+    // POCL appears to work with pinned buffers but it reports errors on buffer unmapping so disable
+    // pinning for POCL platforms out of caution
+    else if ((device_param->is_opencl == true)
+          && (device_param->opencl_platform_vendor_id != VENDOR_ID_POCL))
+    {
+      if (hc_clCreateBuffer (hashcat_ctx, device_param->opencl_context, CL_MEM_ALLOC_HOST_PTR, size_pws_comp, NULL, &device_param->opencl_h_pws_comp) == -1) return -1;
+      if (hc_clCreateBuffer (hashcat_ctx, device_param->opencl_context, CL_MEM_ALLOC_HOST_PTR, size_pws_idx,  NULL, &device_param->opencl_h_pws_idx)  == -1) return -1;
 
-      device_param->pws_idx_b = pws_idx_b;
+      if (hc_clEnqueueMapBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_h_pws_comp, CL_FALSE, 0, 0, size_pws_comp, 0, NULL, NULL, (void **) &device_param->pws_comp) == -1) return -1;
+      if (hc_clEnqueueMapBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_h_pws_idx,  CL_FALSE, 0, 0, size_pws_idx,  0, NULL, NULL, (void **) &device_param->pws_idx)  == -1) return -1;
+
+      if (user_options_extra->wordlist_mode == WL_MODE_STDIN)
+      {
+        if (hc_clCreateBuffer (hashcat_ctx, device_param->opencl_context, CL_MEM_ALLOC_HOST_PTR, size_pws_comp, NULL, &device_param->opencl_h_pws_comp_b) == -1) return -1;
+        if (hc_clCreateBuffer (hashcat_ctx, device_param->opencl_context, CL_MEM_ALLOC_HOST_PTR, size_pws_idx,  NULL, &device_param->opencl_h_pws_idx_b)  == -1) return -1;
+
+        if (hc_clEnqueueMapBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_h_pws_comp_b, CL_FALSE, 0, 0, size_pws_comp, 0, NULL, NULL, (void **) &device_param->pws_comp_b) == -1) return -1;
+        if (hc_clEnqueueMapBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_h_pws_idx_b,  CL_FALSE, 0, 0, size_pws_idx,  0, NULL, NULL, (void **) &device_param->pws_idx_b)  == -1) return -1;
+      }
+    }
+    else
+    {
+      // non-pinned host-side pwd/index buffer allocation
+      // TODO equivalent buffer pinning for metal?
+
+      device_param->pws_comp = (u32 *)      hcmalloc (size_pws_comp);
+      device_param->pws_idx  = (pw_idx_t *) hcmalloc (size_pws_idx);
+
+      if (user_options_extra->wordlist_mode == WL_MODE_STDIN)
+      {
+        device_param->pws_comp_b = (u32 *)      hcmalloc (size_pws_comp);
+        device_param->pws_idx_b  = (pw_idx_t *) hcmalloc (size_pws_idx);
+      }
     }
 
     pw_t *combs_buf = (pw_t *) hccalloc (KERNEL_COMBS, sizeof (pw_t));
@@ -16975,10 +17015,48 @@ void backend_session_destroy (hashcat_ctx_t *hashcat_ctx)
     if (device_param->skipped == true) continue;
 
     hcfree_bridge_aligned (device_param->h_tmps);
-    hcfree (device_param->pws_comp);
-    hcfree (device_param->pws_idx);
-    hcfree (device_param->pws_comp_b);
-    hcfree (device_param->pws_idx_b);
+
+    bool opencl_pinned_bufs = (device_param->opencl_platform_vendor_id != VENDOR_ID_POCL);
+
+    if (device_param->is_cuda == true)
+    {
+      if (device_param->pws_comp)            hc_cuMemFreeHost (hashcat_ctx, device_param->pws_comp);
+      if (device_param->pws_comp_b)          hc_cuMemFreeHost (hashcat_ctx, device_param->pws_comp_b);
+      if (device_param->pws_idx)             hc_cuMemFreeHost (hashcat_ctx, device_param->pws_idx);
+      if (device_param->pws_idx_b)           hc_cuMemFreeHost (hashcat_ctx, device_param->pws_idx_b);
+    }
+    else if (device_param->is_hip == true)
+    {
+      if (device_param->pws_comp)            hc_hipHostFree (hashcat_ctx, device_param->pws_comp);
+      if (device_param->pws_comp_b)          hc_hipHostFree (hashcat_ctx, device_param->pws_comp_b);
+      if (device_param->pws_idx)             hc_hipHostFree (hashcat_ctx, device_param->pws_idx);
+      if (device_param->pws_idx_b)           hc_hipHostFree (hashcat_ctx, device_param->pws_idx_b);
+    }
+    else if ((device_param->is_opencl == true) && (opencl_pinned_bufs == true))
+    {
+      if (device_param->pws_comp)            hc_clEnqueueUnmapMemObject (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_h_pws_comp,   device_param->pws_comp,     0, NULL, NULL);
+      if (device_param->pws_comp_b)          hc_clEnqueueUnmapMemObject (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_h_pws_comp_b, device_param->pws_comp_b,   0, NULL, NULL);
+      if (device_param->pws_idx)             hc_clEnqueueUnmapMemObject (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_h_pws_idx,    device_param->pws_idx,      0, NULL, NULL);
+      if (device_param->pws_idx_b)           hc_clEnqueueUnmapMemObject (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_h_pws_idx_b,  device_param->pws_idx_b,    0, NULL, NULL);
+
+      if (device_param->opencl_h_pws_comp)   hc_clReleaseMemObject (hashcat_ctx, device_param->opencl_h_pws_comp);
+      if (device_param->opencl_h_pws_comp_b) hc_clReleaseMemObject (hashcat_ctx, device_param->opencl_h_pws_comp_b);
+      if (device_param->opencl_h_pws_idx)    hc_clReleaseMemObject (hashcat_ctx, device_param->opencl_h_pws_idx);
+      if (device_param->opencl_h_pws_idx_b)  hc_clReleaseMemObject (hashcat_ctx, device_param->opencl_h_pws_idx_b);
+
+      device_param->opencl_h_pws_comp      = NULL;
+      device_param->opencl_h_pws_comp_b    = NULL;
+      device_param->opencl_h_pws_idx       = NULL;
+      device_param->opencl_h_pws_idx_b     = NULL;
+    }
+    else
+    {
+      hcfree (device_param->pws_comp);
+      hcfree (device_param->pws_comp_b);
+      hcfree (device_param->pws_idx);
+      hcfree (device_param->pws_idx_b);
+    }
+
     hcfree (device_param->pws_pre_buf);
     hcfree (device_param->pws_base_buf);
     hcfree (device_param->combs_buf);

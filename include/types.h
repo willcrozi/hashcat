@@ -1986,6 +1986,11 @@ typedef struct hc_device_param
   cl_mem            opencl_d_st_esalts_buf;
   cl_mem            opencl_d_kernel_param;
 
+  cl_mem            opencl_h_pws_comp;
+  cl_mem            opencl_h_pws_comp_b;
+  cl_mem            opencl_h_pws_idx;
+  cl_mem            opencl_h_pws_idx_b;
+
 } hc_device_param_t;
 
 typedef struct backend_ctx
