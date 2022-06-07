@@ -307,15 +307,6 @@ static void *thread_stdin_crack (void *p)
   return NULL;
 }
 
-static void *buf_align (void *buf, u16 align)
-{
-  if (align <= 1) return buf;
-
-  u16 offset = (uintptr_t) buf % align;
-
-  return buf + ((align - offset) % align);
-}
-
 static int calc_stdin (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, stdin_ctx_t *stdin_ctx)
 {
   user_options_t       *user_options       = hashcat_ctx->user_options;
@@ -328,41 +319,70 @@ static int calc_stdin (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_par
   const u32 attack_mode = user_options->attack_mode;
   const u32 attack_kern = user_options_extra->attack_kern;
 
-  // initialize stdin buffer and cursors
+  char *in_buf;
+  char *in_buf_alloc;
 
-  char *in_buf_alloc = hccalloc (1, STDIN_BUF_ALLOC_SZ);
+  indexer_cfg_t indexer_cfg = get_indexer_cfg (user_options->stdin_fast);
 
-  if (in_buf_alloc == NULL) return -1;
+  index_fn_t index_lines = indexer_cfg.index_lines;
 
-  char *restrict in_buf = buf_align (in_buf_alloc + 1, STDIN_BLK_SZ);
+  pw_in_buf_alloc (&in_buf, &in_buf_alloc, STDIN_BUF_SZ, indexer_cfg.align, indexer_cfg.blk_sz);
 
-  *(in_buf - 1) = '\n'; // prepend sentinel
+  if (in_buf == NULL) return -1;
 
-  char *next_line = in_buf;
-  char *buf_limit = in_buf;
+  // setup host post-processing params
 
-  // setup iconv
+  host_proc_param_t host_proc_param;
 
-  bool iconv_enabled = false;
+  host_proc_param.hashcat_ctx   = hashcat_ctx;
+  host_proc_param.iconv_enabled = false;
+  host_proc_param.iconv_ctx     = NULL;
+  host_proc_param.iconv_tmp     = NULL;
 
-  iconv_t iconv_ctx = NULL;
-
-  char *iconv_tmp = NULL;
+  if (attack_mode == ATTACK_MODE_HYBRID2)
+  {
+    host_proc_param.rule_jk_len = user_options_extra->rule_len_r;
+    host_proc_param.rule_jk_buf = user_options->rule_buf_r;
+  }
+  else
+  {
+    host_proc_param.rule_jk_len = user_options_extra->rule_len_l;
+    host_proc_param.rule_jk_buf = user_options->rule_buf_l;
+  }
 
   if (strcmp (user_options->encoding_from, user_options->encoding_to) != 0)
   {
-    iconv_enabled = true;
+    host_proc_param.iconv_enabled = true;
 
-    iconv_ctx = iconv_open (user_options->encoding_to, user_options->encoding_from);
+    host_proc_param.iconv_ctx = iconv_open (user_options->encoding_to, user_options->encoding_from);
 
-    if (iconv_ctx == (iconv_t) -1)
+    if (host_proc_param.iconv_ctx == (iconv_t) -1)
     {
       hcfree (in_buf_alloc);
 
       return -1;
     }
 
-    iconv_tmp = (char *) hcmalloc (HCBUFSIZ_TINY);
+    host_proc_param.iconv_tmp = (char *) hcmalloc (HCBUFSIZ_TINY);
+  }
+
+  // setup indexer params
+
+  indexer_param_t indexer_param;
+
+  indexer_param.next_line   = in_buf;
+  indexer_param.buf_limit   = in_buf;
+  indexer_param.pws_comp    = device_param->pws_comp_b;
+  indexer_param.pws_idx     = device_param->pws_idx_b;
+  indexer_param.pws_cnt     = 0;
+  indexer_param.pws_cnt_max = device_param->kernel_power;
+  indexer_param.pw_min      = 0;
+  indexer_param.pw_max      = PW_MAX;
+
+  if (attack_kern == ATTACK_KERN_STRAIGHT)
+  {
+    indexer_param.pw_min    = hashconfig->pw_min;
+    indexer_param.pw_max    = hashconfig->pw_max;
   }
 
   // per device upload/cracking thread setup
@@ -371,18 +391,15 @@ static int calc_stdin (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_par
 
   crack_ctx_init (&crack_ctx, hashcat_ctx, device_param);
 
-  u32      *pws_comp_next = device_param->pws_comp_b;
-  pw_idx_t *pws_idx_next  = device_param->pws_idx_b;
-
-  u64 pws_cnt_next = 0;
-
-  // password input main loop
-
-  bool eof = false;
+  // stdin reader condvar
 
   hc_thread_cond_t cond_read;
 
   hc_thread_cond_init (&cond_read);
+
+  // password input main loop
+
+  bool eof = false;
 
   while (status_ctx->run_thread_level1 == true)
   {
@@ -390,12 +407,12 @@ static int calc_stdin (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_par
 
     u64 words_extra_total = 0;
 
-    while (pws_cnt_next < device_param->kernel_power)
+    while (indexer_param.pws_cnt < indexer_param.pws_cnt_max)
     {
-      if (next_line >= buf_limit)
-      {
-        // assert (next_line <= (buf_limit + 1)); // next_line can be buf_limit + 1 if sentinel was hit
+      if (status_ctx->run_thread_level1 == false) break;
 
+      if (indexer_param.next_line >= indexer_param.buf_limit)
+      {
         stdin_result_t result;
 
         result = stdin_read (stdin_ctx, in_buf, &cond_read);
@@ -407,83 +424,13 @@ static int calc_stdin (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_par
           break;
         }
 
-        next_line = result.start;
-        buf_limit = next_line + result.cnt;
+        indexer_param.next_line = result.start;
+        indexer_param.buf_limit = indexer_param.next_line + result.cnt;
       }
 
-      // move to the next line (relies on '\n' sentinel)
+      // index and copy input passwords
 
-      char *line_buf = next_line;
-
-      char prev = '\0';
-
-      while (*next_line != '\n') prev = *next_line++;
-
-      size_t line_len = next_line - line_buf;
-
-      if (prev == '\r') line_len--;
-
-      next_line++;
-
-      line_len = convert_from_hex (hashcat_ctx, line_buf, (u32) line_len);
-
-      // do the on-the-fly encoding
-
-      if (iconv_enabled == true)
-      {
-        char  *iconv_ptr = iconv_tmp;
-        size_t iconv_sz  = HCBUFSIZ_TINY;
-
-        if (iconv (iconv_ctx, &line_buf, &line_len, &iconv_ptr, &iconv_sz) == (size_t) -1) continue;
-
-        line_buf = iconv_tmp;
-        line_len = HCBUFSIZ_TINY - iconv_sz;
-      }
-
-      // post-process rule engine
-
-      char rule_buf_out[RP_PASSWORD_SIZE];
-
-      int   rule_jk_len = (int)    user_options_extra->rule_len_l;
-      const char *rule_jk_buf = user_options->rule_buf_l;
-
-      if (attack_mode == ATTACK_MODE_HYBRID2)
-      {
-        rule_jk_len = (int)    user_options_extra->rule_len_r;
-        rule_jk_buf = user_options->rule_buf_r;
-      }
-
-      if (run_rule_engine (rule_jk_len, rule_jk_buf))
-      {
-        if (line_len >= RP_PASSWORD_SIZE) continue;
-
-        memset (rule_buf_out, 0, sizeof (rule_buf_out));
-
-        const int rule_len_out = _old_apply_rule (rule_jk_buf, rule_jk_len, line_buf, (int) line_len, rule_buf_out);
-
-        if (rule_len_out < 0) continue;
-
-        line_buf = rule_buf_out;
-        line_len = (size_t) rule_len_out;
-      }
-
-      if (line_len > PW_MAX) continue;
-
-      // hmm that's always the case, or?
-
-      if (attack_kern == ATTACK_KERN_STRAIGHT)
-      {
-        if ((line_len < hashconfig->pw_min) || (line_len > hashconfig->pw_max))
-        {
-          words_extra_total++;
-
-          continue;
-        }
-      }
-
-      pw_add_raw (pws_comp_next, pws_idx_next, &pws_cnt_next, (const u8 *) line_buf, (const int) line_len);
-
-      if (status_ctx->run_thread_level1 == false) break;
+      words_extra_total += index_lines (&indexer_param, &host_proc_param);
     }
 
     if (words_extra_total > 0)
@@ -498,6 +445,8 @@ static int calc_stdin (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_par
       hc_thread_mutex_unlock (status_ctx->mux_counter);
     }
 
+    if (status_ctx->run_thread_level1 == false) break;
+
     crack_ctx_wait_idle (&crack_ctx);
 
     if (crack_ctx.err == true) break;
@@ -506,20 +455,20 @@ static int calc_stdin (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_par
 
     if (device_param->speed_only_finish == true) break;
 
-    if (pws_cnt_next == 0) continue;
+    if (indexer_param.pws_cnt == 0) continue;
 
     // flip/reset host password buffers
 
-    u32      *pws_comp_done = device_param->pws_comp;
-    pw_idx_t *pws_idx_done  = device_param->pws_idx;
+    u32      *pws_comp_tmp = device_param->pws_comp;
+    pw_idx_t *pws_idx_tmp  = device_param->pws_idx;
 
-    device_param->pws_comp = pws_comp_next;
-    device_param->pws_idx  = pws_idx_next;
-    device_param->pws_cnt  = pws_cnt_next;
+    device_param->pws_comp = indexer_param.pws_comp;
+    device_param->pws_idx  = indexer_param.pws_idx;
+    device_param->pws_cnt  = indexer_param.pws_cnt;
 
-    pws_comp_next = pws_comp_done;
-    pws_idx_next  = pws_idx_done;
-    pws_cnt_next  = 0;
+    indexer_param.pws_comp = pws_comp_tmp;
+    indexer_param.pws_idx  = pws_idx_tmp;
+    indexer_param.pws_cnt  = 0;
 
     // notify crack-thread of new work
 
@@ -528,8 +477,8 @@ static int calc_stdin (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_par
 
   crack_ctx_close (&crack_ctx, status_ctx->run_thread_level1);
 
-  device_param->pws_comp_b = pws_comp_next;
-  device_param->pws_idx_b  = pws_idx_next;
+  device_param->pws_comp_b = indexer_param.pws_comp;
+  device_param->pws_idx_b  = indexer_param.pws_idx;
 
   device_param->kernel_accel_prev   = device_param->kernel_accel;
   device_param->kernel_loops_prev   = device_param->kernel_loops;
@@ -539,11 +488,11 @@ static int calc_stdin (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_par
   device_param->kernel_loops   = 0;
   device_param->kernel_threads = 0;
 
-  if (iconv_enabled == true)
+  if (host_proc_param.iconv_enabled == true)
   {
-    iconv_close (iconv_ctx);
+    iconv_close (host_proc_param.iconv_ctx);
 
-    hcfree (iconv_tmp);
+    hcfree (host_proc_param.iconv_tmp);
   }
 
   hcfree (in_buf_alloc);

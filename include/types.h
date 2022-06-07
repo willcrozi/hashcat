@@ -801,6 +801,7 @@ typedef enum user_options_defaults
   STATUS                   = false,
   STATUS_JSON              = false,
   STATUS_TIMER             = 10,
+  STDIN_FAST               = false,
   STDIN_TIMEOUT_ABORT      = 120,
   STDOUT_FLAG              = false,
   USAGE                    = 0,
@@ -941,8 +942,9 @@ typedef enum user_options_map
   IDX_STATUS                    = 0xff4a,
   IDX_STATUS_JSON               = 0xff4b,
   IDX_STATUS_TIMER              = 0xff4c,
-  IDX_STDOUT_FLAG               = 0xff4d,
+  IDX_STDIN_FAST                = 0xff62,
   IDX_STDIN_TIMEOUT_ABORT       = 0xff4e,
+  IDX_STDOUT_FLAG               = 0xff4d,
   IDX_TOTAL_CANDIDATES          = 0xff58,
   IDX_TRUECRYPT_KEYFILES        = 0xff4f,
   IDX_USERNAME                  = 0xff50,
@@ -2614,6 +2616,7 @@ typedef struct user_options
   u32          scrypt_tmto;
   u32          segment_size;
   u32          status_timer;
+  u32          stdin_fast;
   u32          stdin_timeout_abort;
   u32          usage;
   u32          veracrypt_pim_start;

@@ -6,11 +6,8 @@
 #ifndef _STDIN_H
 #define _STDIN_H
 
-#define STDIN_BUF_SZ       (48 * 1024)
-#define STDIN_BLK_SZ       (sizeof (char16))
-#define STDIN_BUF_ALLOC_SZ (STDIN_BLK_SZ + STDIN_BUF_SZ + STDIN_BLK_SZ) // allow for alignment, sentinels, and vector overrun
-
-#define PARTIAL_BUF_SZ     (PW_MAX + STDIN_BLK_SZ) // allow for vector overrun
+#define STDIN_BUF_SZ   (48 * 1024)
+#define PARTIAL_BUF_SZ (PW_MAX + sizeof (char16))
 
 typedef struct stdin_ctx
 {

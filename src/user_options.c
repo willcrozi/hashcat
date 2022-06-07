@@ -152,6 +152,7 @@ static const struct option long_options[] =
   {"status-json",               no_argument,       NULL, IDX_STATUS_JSON},
   {"status-timer",              required_argument, NULL, IDX_STATUS_TIMER},
   {"stdout",                    no_argument,       NULL, IDX_STDOUT_FLAG},
+  {"stdin-fast",                no_argument,       NULL, IDX_STDIN_FAST},
   {"stdin-timeout-abort",       required_argument, NULL, IDX_STDIN_TIMEOUT_ABORT},
   {"truecrypt-keyfiles",        required_argument, NULL, IDX_TRUECRYPT_KEYFILES},
   {"username",                  no_argument,       NULL, IDX_USERNAME},
@@ -315,6 +316,7 @@ int user_options_init (hashcat_ctx_t *hashcat_ctx)
   user_options->status                    = STATUS;
   user_options->status_json               = STATUS_JSON;
   user_options->status_timer              = STATUS_TIMER;
+  user_options->stdin_fast                = STDIN_FAST;
   user_options->stdin_timeout_abort       = STDIN_TIMEOUT_ABORT;
   user_options->stdout_flag               = STDOUT_FLAG;
   user_options->truecrypt_keyfiles        = NULL;
@@ -474,6 +476,7 @@ int user_options_getopt (hashcat_ctx_t *hashcat_ctx, int argc, char **argv)
       case IDX_BENCHMARK_MAX:             user_options->benchmark_max             = hc_strtoul (optarg, NULL, 10);   break;
       case IDX_BENCHMARK_MIN:             user_options->benchmark_min             = hc_strtoul (optarg, NULL, 10);   break;
       case IDX_STDOUT_FLAG:               user_options->stdout_flag               = true;                            break;
+      case IDX_STDIN_FAST:                user_options->stdin_fast                = true;                            break;
       case IDX_STDIN_TIMEOUT_ABORT:       user_options->stdin_timeout_abort       = hc_strtoul (optarg, NULL, 10);
                                           user_options->stdin_timeout_abort_chgd  = true;                            break;
       case IDX_IDENTIFY:                  user_options->identify                  = true;                            break;
@@ -1641,6 +1644,66 @@ int user_options_sanity (hashcat_ctx_t *hashcat_ctx)
 
       return -1;
     }
+  }
+
+  if (user_options->stdin_fast == true)
+  {
+    // --stdin-fast can only be used in stdin mode
+
+    int hc_argc_expected = 1; // our hash file (note: hc_argc only counts hash files and dicts)
+
+    if (user_options->stdout_flag == true) hc_argc_expected = 0; // special case: no hash file
+
+    if (user_options->hc_argc > hc_argc_expected)
+    {
+      event_log_error (hashcat_ctx, "Use of --stdin-fast is only allowed in stdin mode (pipe).");
+
+      return -1;
+    }
+
+    // --stdin-fast cannot be used when converting between character encodings
+
+    if (strcmp (user_options->encoding_from, user_options->encoding_to) != 0)
+    {
+      event_log_error (hashcat_ctx, "Using --stdin-fast is not allowed when input/output wordlist encodings differ.");
+
+      return -1;
+    }
+
+    // --stdin-fast cannot be used with host rule engine
+
+    const char  *rule_buf;
+
+    if ((user_options->optimized_kernel == true) && (user_options->attack_mode == ATTACK_MODE_COMBI))
+    {
+      rule_buf = user_options->rule_buf_r; // left and right rule buffers get swapped in this configuration
+    }
+    else
+    {
+      rule_buf = user_options->rule_buf_l;
+    }
+
+    size_t rule_len = strlen (rule_buf);
+
+    if ((rule_len > 1) || ((rule_len == 1) && (rule_buf[0] != RULE_OP_MANGLE_NOOP)))
+    {
+      event_log_error (hashcat_ctx, "Using --stdin-fast is not allowed with configurations requiring host rule engine.");
+
+      return -1;
+    }
+
+    // --stdin-fast cannot be used with hex encoded input
+
+    if ((user_options->hex_charset == true) || (user_options->hex_wordlist == true))
+    {
+      event_log_error (hashcat_ctx, "Using --stdin-fast is not allowed with hex charset/wordlist input.");
+
+      return -1;
+    }
+
+    // disable autohex conversion
+
+    user_options->wordlist_autohex = false;
   }
 
   if (user_options->backend_info > 2)

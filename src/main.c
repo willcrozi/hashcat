@@ -602,6 +602,13 @@ static void main_outerloop_mainscreen (MAYBE_UNUSED hashcat_ctx_t *hashcat_ctx, 
 
     event_log_advice (hashcat_ctx, NULL);
   }
+
+  if (user_options->stdin_fast == true)
+  {
+    event_log_advice (hashcat_ctx, "ATTENTION! --stdin-fast mode disables autohex input conversion");
+    event_log_advice (hashcat_ctx, NULL);
+  }
+
   /**
    * Watchdog and Temperature balance
    */

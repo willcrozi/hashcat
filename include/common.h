@@ -114,6 +114,11 @@ but this is needed for VS compiler which doesn't have inline keyword but has __i
 #pragma GCC diagnostic ignored "-Wcast-function-type"
 #endif
 
+// optimizer hint shorthands
+
+#define likely(x)	  __builtin_expect (!!(x), 1)
+#define unlikely(x)	__builtin_expect (!!(x), 0)
+
 // config section
 // do not try to simply change this, it will not work
 
